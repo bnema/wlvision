@@ -31,14 +31,30 @@ the module is compiled against that exact revision inside the image.
 | Keyboard injection | `weston_keyboard_send_key`, `_send_modifiers`, `_send_keymap` | `include/libweston/libweston.h` | public |
 | Seat and output enumeration | `compositor->seat_list`, `compositor->output_list`, `struct weston_seat` keyboard/pointer, `struct weston_output` geometry and `frame_signal` | `include/libweston/libweston.h` | public |
 | Post-repaint observation | `weston_output.frame_signal`, emitted by the pixman renderer after a repaint | `include/libweston/libweston.h`, `libweston/pixman-renderer.c` | public field, emitted by `libweston/pixman-renderer.h` |
-| Capture authorization | `weston_compositor_add_screenshot_authority`, `struct weston_output_capture_attempt`, `struct weston_output_capture_client` | `include/libweston/libweston.h` | public |
-| Capture internals | `weston_output_capture_info_repaint_done` and the source enum | `libweston/output-capture.h` | source-tree |
+| Capture authorization | `weston_compositor_add_screenshot_authority`, `struct weston_output_capture_attempt`, `struct weston_output_capture_client` | `include/libweston/libweston.h` | public, exported |
 | Peer credentials | `wl_client_get_credentials`, `wl_resource_get_client` | `wayland-server-core.h` | public (libwayland) |
-| Headless output and pixman renderer | `libweston/backend-headless.h`, `libweston/pixman-renderer.h` | source-tree | source-tree |
+| Headless output and pixman renderer | configuration only: the module uses neither header | image configuration | not needed |
 
-`compositor->output_capture.weston_capture_v1` holds the capture global;
-`repaint_only_on_capture` exists on `struct weston_output`, which is what lets a
-capture request force a repaint when an application has produced no damage.
+The probe measured this rather than assuming it. `nm -D --defined-only` on
+the built `libweston-16.so.0` reports all six desktop-surface symbols, eight
+input-injection symbols, both seat accessors and
+`weston_compositor_add_screenshot_authority` as exported; `wl_client_get_credentials`
+and `wl_resource_get_client` are exported by `libwayland-server.so.0`. Two
+findings change earlier assumptions: the capture authority is **public**, not a
+private interface — `libweston/output-capture.h` is not installed and does not
+declare it, so the module needs no source-tree include path — and there is **no
+separate `libweston-desktop` library**; desktop is compiled into
+`libweston-16.so`.
+
+## Repaint and capture
+
+`compositor->output_capture.weston_capture_v1` holds the capture global, and
+`struct weston_output` carries `repaint_only_on_capture`, which is what lets a
+capture request force a repaint when an application has produced no damage. The
+pixman renderer emits `output->frame_signal` at the end of a repaint
+(`libweston/pixman-renderer.c:641`), which is the hook the module uses to assign
+monotonic frame sequences and to correlate the capture request that forced the
+repaint.
 
 ## Blocking finding: a module cannot observe toplevels from beside the shell
 
@@ -91,10 +107,24 @@ purpose-built shell is exactly how upstream tests observe surfaces.
 
 ## Probe
 
-`test/weston-probe/` builds the pinned revision with meson (headless backend,
-pixman renderer, libweston and libweston-desktop) in a container and compiles
+`test/weston-probe/` builds the pinned revision in a container and compiles
 `probe.c` against it, so every interface above is proven to exist and link at
-this commit rather than assumed. Build inputs are fetched and digest-verified in
-a separate stage; the verification build runs with `--network=none`.
+this commit rather than assumed:
 
-Result of that build is recorded in `test/weston-probe/README.md`.
+```bash
+docker build -t wlvision-weston-inputs:local -f test/weston-probe/Containerfile.inputs test/weston-probe
+docker build --network=none -t wlvision-weston-probe:local -f test/weston-probe/Containerfile test/weston-probe
+docker run --rm wlvision-weston-probe:local sh -c 'ls -l /probe.so && ldd /probe.so'
+```
+
+The input stage fetches the lock's archive URL and fails unless its digest
+matches, then verifies every `file_sha256/*` entry against the unpacked tree;
+the verification stage runs with `--network=none` and uses only the packages
+that stage cached. The build produces `/probe.so` as a module linked against
+`libweston-16.so.0`, with `wet_module_init` present as a dynamic symbol.
+
+`cairo` and `libpng` are required by Weston's own meson unconditionally, so they
+are build dependencies of the image; no meson option had to be relaxed beyond
+disabling DRM, GL, X11, the Wayland backend, VNC, RDP, PipeWire, Xwayland, tests,
+docs and tools. Exact commands, base-image digests and the offline build evidence
+are in `test/weston-probe/README.md`.

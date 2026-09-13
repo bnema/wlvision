@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# wlvision - pinned-Weston probe, verification stage.
+#
+# This stage must build with --network=none: it never fetches anything.  It
+# starts from the image produced by Containerfile.inputs, which has already
+# fetched and digest-verified the pinned Weston archive into /src/weston and
+# pre-downloaded the build dependencies into /opt/weston-deps.
+#
+# Build (inputs first - the probe build FROMs that image by tag):
+#
+#   docker build -t wlvision-weston-inputs:local \
+#       -f test/weston-probe/Containerfile.inputs test/weston-probe
+#   docker build --network=none -t wlvision-weston-probe:local \
+#       -f test/weston-probe/Containerfile test/weston-probe
+#
+FROM wlvision-weston-inputs:local
+
+COPY probe.c /src/probe.c
+
+# Install the build dependencies from the cache the input stage prepared.
+RUN set -eux; \
+    pacman -U --noconfirm /opt/weston-deps/*.pkg.tar.zst
+
+# Configure and build only what the control module needs: libweston (which in
+# 16.0.0 contains the former libweston-desktop), the headless backend and the
+# pixman renderer.  Every other backend, renderer, shell, client, tool, test
+# and the documentation are disabled.  backend-default must be headless
+# because the DRM backend it defaults to is disabled.
+RUN set -eux; cd /src/weston; \
+    meson setup build --prefix=/usr \
+        -Dbackend-default=headless \
+        -Dbackend-headless=true \
+        -Dbackend-drm=false \
+        -Dbackend-wayland=false \
+        -Dbackend-x11=false \
+        -Dbackend-vnc=false \
+        -Dbackend-rdp=false \
+        -Dbackend-pipewire=false \
+        -Drenderer-gl=false \
+        -Drenderer-vulkan=false \
+        -Dxwayland=false \
+        -Dsystemd=false \
+        -Dcolor-management-lcms=false \
+        -Dimage-jpeg=false \
+        -Dimage-webp=false \
+        -Dshell-desktop=false \
+        -Dshell-ivi=false \
+        -Dshell-kiosk=false \
+        -Dshell-lua=false \
+        -Ddemo-clients=false \
+        -Dsimple-clients= \
+        -Dtests=false \
+        -Ddoc=false; \
+    ninja -C build; \
+    ninja -C build install
+
+# Compile probe.c as a shared module linked against the freshly built
+# libweston.  pkg-config finds the libweston-16.pc and headers that
+# `ninja install` just put in /usr.
+RUN set -eux; \
+    cc -shared -fPIC -Wall -Wextra \
+       -o /probe.so /src/probe.c \
+       $(pkg-config --cflags --libs libweston-16 wayland-server)
