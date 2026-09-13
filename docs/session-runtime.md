@@ -96,6 +96,24 @@ liveness of the compositor and the controller, so a probe run through an exec
 reports a session whose processes died instead of the supervisor's last
 optimistic observation.
 
+## Interaction and timing
+
+A resize completes only once the application has committed a buffer matching the
+size it was configured with, so a successful `resize` means the size took
+effect. The result, and the failure a caller's `--timeout` produces, report the
+requested, configured, committed and visible sizes separately: an application
+that keeps its own size is visible as configured != visible rather than as a
+silent success.
+
+Visual stability is proven by capture probes, never by an idle interval: each
+probe forces a repaint, and a run of identical observations resets whenever the
+digest, the window revision or the frame's size or format changes, and whenever
+a probe could not be taken at its deadline. One consequence is worth knowing
+before asking for a short `--stable-for`: stability cannot be proven faster than
+one capture round trip through the container boundary, because a probe that
+could not be issued at its deadline resets the run rather than counting as
+evidence.
+
 ## Verification
 
 `test/integration/run.sh` builds the session image, cross-compiles the
