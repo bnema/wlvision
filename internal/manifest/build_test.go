@@ -297,7 +297,86 @@ func TestBuildUsesTheManifestNetworkPolicy(t *testing.T) {
 			if fake.CountCalls("build ") != 1 {
 				t.Errorf("call log = %v, want exactly one build", fake.CallLog())
 			}
+			if fake.CountCalls("image-id ") != 0 {
+				t.Errorf("call log = %v, want no image-id lookup for a reference-digest base", fake.CallLog())
+			}
 		})
+	}
+}
+
+func TestBuildVerifiesAnEngineHeldBase(t *testing.T) {
+	dir := project(t)
+	planned := loadAndPlan(t, writeManifest(t, dir, localBaseBody()))
+	if planned.Digest != localImageID {
+		t.Fatalf("Digest = %q, want the declared local image id", planned.Digest)
+	}
+
+	fake := enginetest.New()
+	fake.ImageIDValue = localImageID
+	fake.BuildValue = engine.BuildResult{ImageID: "sha256:" + strings.Repeat("c", 64)}
+	fake.BuildOutput = "==> building from the local base\n"
+
+	built, err := Build(context.Background(), fake, planned, t.TempDir())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if built.Tag != planned.Tag {
+		t.Errorf("Tag = %q, want %q", built.Tag, planned.Tag)
+	}
+	if fake.CountCalls("image-id wlvision-runtime:local") != 1 {
+		t.Errorf("call log = %v, want the base image id to be read", fake.CallLog())
+	}
+	if len(fake.Builds()) != 1 {
+		t.Errorf("the engine saw %d builds, want 1", len(fake.Builds()))
+	}
+}
+
+func TestBuildRefusesAMismatchedEngineHeldBase(t *testing.T) {
+	dir := project(t)
+	planned := loadAndPlan(t, writeManifest(t, dir, localBaseBody()))
+
+	other := "sha256:" + strings.Repeat("b", 64)
+	fake := enginetest.New()
+	fake.ImageIDValue = other
+
+	staging := t.TempDir()
+	_, err := Build(context.Background(), fake, planned, staging)
+	if err == nil {
+		t.Fatal("a base whose id does not match the manifest was accepted")
+	}
+
+	failure := failureOf(t, err)
+	if failure.Code != result.CodeImageUnavailable {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeImageUnavailable)
+	}
+	if !strings.Contains(failure.Message, localImageID) || !strings.Contains(failure.Message, other) {
+		t.Errorf("message %q does not name both ids", failure.Message)
+	}
+	if len(fake.Builds()) != 0 || fake.CountCalls("build ") != 0 {
+		t.Errorf("call log = %v, want no build for a mismatched base", fake.CallLog())
+	}
+	if _, err := os.Stat(filepath.Join(staging, "Containerfile")); !os.IsNotExist(err) {
+		t.Error("the context was staged before the base id was verified")
+	}
+}
+
+func TestBuildRefusesAnEngineHeldBaseTheEngineLacks(t *testing.T) {
+	dir := project(t)
+	planned := loadAndPlan(t, writeManifest(t, dir, localBaseBody()))
+
+	fake := enginetest.New()
+	fake.ImageIDErr = errors.New("engine: no such image")
+
+	_, err := Build(context.Background(), fake, planned, t.TempDir())
+	if err == nil {
+		t.Fatal("a missing base image was accepted")
+	}
+	failure := failureOf(t, err)
+	if failure.Code != result.CodeImageUnavailable {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeImageUnavailable)
+	}
+	if fake.CountCalls("build ") != 0 {
+		t.Errorf("call log = %v, want no build for a missing base", fake.CallLog())
 	}
 }
 

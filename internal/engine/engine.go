@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -27,6 +29,9 @@ type Kind string
 
 // KindDocker is the engine selected by the Docker adapter.
 const KindDocker Kind = "docker"
+
+// KindPodman is the engine selected by the Podman adapter.
+const KindPodman Kind = "podman"
 
 // LabelSession marks every container wlvision creates, so a session record can
 // be reconciled against engine state after a crash.
@@ -181,6 +186,70 @@ func (s CreateSpec) validate() error {
 	return nil
 }
 
+// createArgs renders the container argument list every adapter passes to its
+// engine. It is the isolation contract of a session in argument form — no
+// network, a read-only root, no capabilities, no new privileges, separate
+// control and application identities, and bounded tmpfs mounts — stated once
+// so that no engine can be talked into weakening a session.
+func createArgs(spec CreateSpec) []string {
+	args := []string{
+		"create",
+		"--name", spec.Name,
+		"--label", LabelSession + "=" + spec.Session,
+		"--network", "none",
+		"--read-only",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--user", fmt.Sprintf("%d:%d", spec.ControlUID, spec.ControlGID),
+	}
+
+	// Both engines apply their built-in seccomp profile by default and report
+	// it through Capabilities, so neither adapter may disable it here.
+
+	if spec.Limits.MemoryBytes > 0 {
+		args = append(args, "--memory", strconv.FormatInt(spec.Limits.MemoryBytes, 10))
+	}
+	if spec.Limits.Pids > 0 {
+		args = append(args, "--pids-limit", strconv.Itoa(spec.Limits.Pids))
+	}
+	if spec.Limits.FileSizeBytes > 0 {
+		args = append(args, "--ulimit", "fsize="+strconv.FormatInt(spec.Limits.FileSizeBytes, 10))
+	}
+	if spec.Limits.OpenFiles > 0 {
+		args = append(args, "--ulimit", "nofile="+strconv.Itoa(spec.Limits.OpenFiles))
+	}
+	for _, mount := range spec.Tmpfs {
+		args = append(args, "--tmpfs", mount.Path+":"+mount.option())
+	}
+
+	args = append(args,
+		"-e", EnvSession+"="+spec.Session,
+		"-e", EnvControlUID+"="+strconv.FormatUint(uint64(spec.ControlUID), 10),
+		"-e", EnvApplicationUID+"="+strconv.FormatUint(uint64(spec.ApplicationUID), 10),
+		spec.Image,
+	)
+	return append(args, spec.Command...)
+}
+
+// validateBuildSpec refuses a build wlvision cannot reproduce: the context is
+// the generated directory, the Containerfile is a plain name inside it, and
+// the tag is explicit.
+func validateBuildSpec(spec BuildSpec) error {
+	switch {
+	case spec.Context == "" || !filepath.IsAbs(spec.Context):
+		return usageFailure("engine.build", "the build context must be an absolute directory")
+	case spec.Tag == "":
+		return usageFailure("engine.build", "an image tag is required")
+	case spec.Containerfile == "":
+		return usageFailure("engine.build", "a Containerfile name is required")
+	}
+	if filepath.IsAbs(spec.Containerfile) || spec.Containerfile == "." || spec.Containerfile == ".." || strings.ContainsAny(spec.Containerfile, `/:\\`) {
+		return usageFailure("engine.build",
+			"the Containerfile %q is not a name inside the build context", spec.Containerfile)
+	}
+	return nil
+}
+
 // ExecSpec runs one command in an existing session under an explicit identity.
 type ExecSpec struct {
 	ContainerID string
@@ -249,6 +318,9 @@ type Engine interface {
 	// Build builds an image from a generated context and returns its id. It is
 	// the only operation that may use the network, and only for the build.
 	Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
+	// ImageID reports the identifier the engine holds for a reference, which
+	// is how a locally built image is pinned without a registry digest.
+	ImageID(ctx context.Context, reference string) (string, error)
 	// Create creates a stopped container and returns its identifier.
 	Create(ctx context.Context, spec CreateSpec) (string, error)
 	// Start starts a created container. Starting a running container succeeds.

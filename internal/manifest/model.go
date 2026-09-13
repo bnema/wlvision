@@ -35,6 +35,11 @@ const Schema = "wlvision-manifest/v1"
 // hexadecimal digits, as an OCI digest after "@sha256:".
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// localDigestPattern is the identifier form base.digest must carry when the
+// base is an image the engine already holds: "sha256:" followed by 64
+// lowercase hexadecimal digits, which is what `image inspect` reports.
+var localDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 // credentialDirectories are never copied into an image. A build context is
 // handed to the container engine and may be retained in a layer, so a
 // credential that reaches it is a credential that leaked.
@@ -84,9 +89,15 @@ type Manifest struct {
 
 // Base describes the image a build starts from and the packages it installs.
 type Base struct {
-	// Image must be digest-pinned. A tag without a digest is refused: a tag
-	// moves, and a session must record the bytes it actually ran.
+	// Image names the image a build starts from. It is either a reference
+	// that itself carries an "@sha256:" digest, or a plain reference to an
+	// image the engine already holds, paired with Digest.
 	Image string `toml:"image"`
+	// Digest pins an image the engine already holds, for example a locally
+	// built session image with no registry digest. It is the exact image id
+	// the engine must report for Image at build time. It must be absent when
+	// Image already carries its own digest.
+	Digest string `toml:"digest"`
 	// Packages are installed in one transaction when non-empty.
 	Packages []string `toml:"packages"`
 	// AllowNetwork permits network access during the build only. It defaults
@@ -188,18 +199,36 @@ func (m Manifest) validate() error {
 	return m.Copy.validate(m)
 }
 
-// validate checks the base image and package list.
+// validate checks the base image and package list. A base must be pinned
+// twice over: a reference is accepted only when it either carries its own
+// digest or names an image the engine already holds together with the exact
+// image id that engine must report.
 func (b Base) validate() error {
 	index := strings.LastIndex(b.Image, "@sha256:")
-	if index <= 0 {
+	switch {
+	case index == 0:
+		return usage("base.image", "%q has no image name before the digest", b.Image)
+	case index > 0:
+		digest := b.Image[index+len("@sha256:"):]
+		if !digestPattern.MatchString(digest) {
+			return usage("base.image",
+				"the digest in %q is not 64 lowercase hexadecimal digits", b.Image)
+		}
+		if b.Digest != "" {
+			return usage("base.digest",
+				"base.digest must be absent when base.image already carries a digest")
+		}
+	case b.Image == "":
+		return usage("base.image", "an image reference is required")
+	case b.Digest == "":
 		return usage("base.image",
-			"%q has no image digest; a tag or bare name is refused and a @sha256: digest is required", b.Image)
+			"%q carries neither its own @sha256: digest nor a base.digest; a digest (or a verified local image id) is required",
+			b.Image)
+	case !localDigestPattern.MatchString(b.Digest):
+		return usage("base.digest",
+			"%q is not sha256: followed by 64 lowercase hexadecimal digits", b.Digest)
 	}
-	digest := b.Image[index+len("@sha256:"):]
-	if !digestPattern.MatchString(digest) {
-		return usage("base.image",
-			"the digest in %q is not 64 lowercase hexadecimal digits", b.Image)
-	}
+
 	for i, name := range b.Packages {
 		if name == "" {
 			return usage(fmt.Sprintf("base.packages[%d]", i), "a package name must not be empty")

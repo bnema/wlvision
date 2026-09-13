@@ -626,7 +626,7 @@ func TestDockerBuildConstructsTheCommand(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("the engine ran %d commands, want a build and an inspect", len(runner.calls))
 	}
-	want := []string{"--context", "wlvision-test", "build", "--network=none", "--file", "Containerfile", "--tag", "wlvision-build:abc123", "/tmp/wlvision-build"}
+	want := []string{"--context", "wlvision-test", "build", "--network=none", "--file", "/tmp/wlvision-build/Containerfile", "--tag", "wlvision-build:abc123", "/tmp/wlvision-build"}
 	if strings.Join(runner.calls[0].Args, " ") != strings.Join(want, " ") {
 		t.Errorf("build command = %v, want %v", runner.calls[0].Args, want)
 	}
@@ -709,6 +709,49 @@ func TestDockerBuildReportsAFailedBuild(t *testing.T) {
 	}
 	if len(runner.calls) != 1 {
 		t.Errorf("the engine ran %d commands after a failed build, want 1", len(runner.calls))
+	}
+}
+
+func TestDockerImageIDReadsTheEngineReport(t *testing.T) {
+	eng, runner := dockerWith(t, reply{contains: []string{"image", "inspect"}, stdout: "sha256:c0ffee\n"})
+
+	id, err := eng.ImageID(context.Background(), "wlvision-runtime:local")
+	if err != nil {
+		t.Fatalf("ImageID: %v", err)
+	}
+	if id != "sha256:c0ffee" {
+		t.Errorf("ImageID = %q, want the engine's answer", id)
+	}
+	if !containsAll(runner.lastCall(t).Args, []string{"image", "inspect", "--format", "{{.Id}}", "wlvision-runtime:local"}) {
+		t.Errorf("inspect command = %v", runner.lastCall(t).Args)
+	}
+}
+
+func TestDockerImageIDReportsAnImageTheEngineDoesNotHold(t *testing.T) {
+	eng, _ := dockerWith(t, reply{
+		contains: []string{"image", "inspect"},
+		stderr:   "Error: No such image: wlvision-runtime:local\n",
+		err:      &exec.ExitError{},
+	})
+
+	_, err := eng.ImageID(context.Background(), "wlvision-runtime:local")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ImageID error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDockerImageIDRefusesAnEmptyReference(t *testing.T) {
+	eng, runner := dockerWith(t)
+
+	for _, reference := range []string{"", "-wlvision-runtime:local"} {
+		if _, err := eng.ImageID(context.Background(), reference); err == nil {
+			t.Errorf("ImageID(%q) was accepted", reference)
+		} else if failure := failureOf(t, err); failure.Code != result.CodeUsageError {
+			t.Errorf("code = %s, want %s", failure.Code, result.CodeUsageError)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("the engine ran %d commands for invalid references", len(runner.calls))
 	}
 }
 

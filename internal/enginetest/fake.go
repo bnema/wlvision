@@ -42,6 +42,9 @@ type Fake struct {
 	// build's standard output so a caller sees a build transcript.
 	BuildValue  engine.BuildResult
 	BuildOutput string
+	// ImageIDValue and ImageIDErr answer ImageID.
+	ImageIDValue string
+	ImageIDErr   error
 
 	// Failure injection. A non-nil error is returned by the matching method.
 	CapabilitiesErr error
@@ -120,6 +123,16 @@ func (f *Fake) Builds() []engine.BuildSpec {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]engine.BuildSpec(nil), f.builds...)
+}
+
+// ImageID implements engine.Engine. It records the reference and answers from
+// ImageIDValue, or fails with ImageIDErr.
+func (f *Fake) ImageID(_ context.Context, reference string) (string, error) {
+	f.record("image-id " + reference)
+	if f.ImageIDErr != nil {
+		return "", f.ImageIDErr
+	}
+	return f.ImageIDValue, nil
 }
 
 // Create implements engine.Engine.

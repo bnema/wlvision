@@ -21,10 +21,14 @@ import (
 // of the bound is that the failure stays readable in a JSON envelope.
 const maxStderrDetails = 4096
 
-// Options configures the Docker adapter.
+// Options configures a container engine adapter. Context names the CLI
+// context (Docker) or connection (Podman) the adapter talks to; empty means
+// the engine CLI's own current endpoint, which the adapter records in the
+// capability report.
 type Options struct {
-	// Context selects a Docker CLI context. Empty means the user's current
-	// context, which the adapter records in the capability report.
+	// Context selects a Docker CLI context or a Podman connection. Empty means
+	// the user's current context, which the adapter records in the capability
+	// report.
 	Context string
 }
 
@@ -115,17 +119,8 @@ func (d *Docker) Capabilities(ctx context.Context) (Capabilities, error) {
 // whether the build may use the network. Nothing else about the build is
 // caller-controlled, and a session never uses the network mode set here.
 func (d *Docker) Build(ctx context.Context, spec BuildSpec) (BuildResult, error) {
-	switch {
-	case spec.Context == "" || !filepath.IsAbs(spec.Context):
-		return BuildResult{}, usageFailure("engine.build", "the build context must be an absolute directory")
-	case spec.Tag == "":
-		return BuildResult{}, usageFailure("engine.build", "an image tag is required")
-	case spec.Containerfile == "":
-		return BuildResult{}, usageFailure("engine.build", "a Containerfile name is required")
-	}
-	if filepath.IsAbs(spec.Containerfile) || spec.Containerfile == "." || spec.Containerfile == ".." || strings.ContainsAny(spec.Containerfile, `/:\\`) {
-		return BuildResult{}, usageFailure("engine.build",
-			"the Containerfile %q is not a name inside the build context", spec.Containerfile)
+	if err := validateBuildSpec(spec); err != nil {
+		return BuildResult{}, err
 	}
 
 	network := "none"
@@ -134,8 +129,12 @@ func (d *Docker) Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 	}
 
 	stderr, merged := captureStderr(spec.Stderr)
+	// The engine resolves --file against its own working directory, not against
+	// the context, so the Containerfile is named by its absolute path: a build
+	// must not depend on where the caller happened to be running.
+	containerfile := filepath.Join(spec.Context, spec.Containerfile)
 	err := d.runner.Run(ctx, Command{
-		Args:   d.args("build", "--network="+network, "--file", spec.Containerfile, "--tag", spec.Tag, spec.Context),
+		Args:   d.args("build", "--network="+network, "--file", containerfile, "--tag", spec.Tag, spec.Context),
 		Stdout: spec.Stdout,
 		Stderr: merged,
 	})
@@ -160,6 +159,27 @@ func (d *Docker) Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 	return BuildResult{ImageID: imageID}, nil
 }
 
+// ImageID implements Engine. It reports the identifier the engine holds for a
+// reference, which is how a manifest pins a locally built image that has no
+// registry digest. A reference the engine does not hold is ErrNotFound, so a
+// caller can tell a missing image apart from an unreachable engine.
+func (d *Docker) ImageID(ctx context.Context, reference string) (string, error) {
+	if reference == "" || strings.HasPrefix(reference, "-") {
+		return "", usageFailure("engine.image_id", "an image reference is required")
+	}
+
+	out, err := d.output(ctx, d.context, "engine.image_id", "image", "inspect", "--format", "{{.Id}}", reference)
+	if err != nil {
+		return "", missingContainer(err, reference)
+	}
+	imageID := strings.TrimSpace(string(out))
+	if imageID == "" {
+		return "", result.NewFailure(result.CodeImageUnavailable, "engine.image_id",
+			"the engine holds %q but reported no image identifier", reference)
+	}
+	return imageID, nil
+}
+
 // Create implements Engine. Every flag here is fixed policy; the spec cannot
 // add, replace, or drop one.
 func (d *Docker) Create(ctx context.Context, spec CreateSpec) (string, error) {
@@ -167,42 +187,7 @@ func (d *Docker) Create(ctx context.Context, spec CreateSpec) (string, error) {
 		return "", err
 	}
 
-	args := []string{
-		"create",
-		"--name", spec.Name,
-		"--label", LabelSession + "=" + spec.Session,
-		"--network", "none",
-		"--read-only",
-		"--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges",
-		"--user", fmt.Sprintf("%d:%d", spec.ControlUID, spec.ControlGID),
-	}
-
-	// The built-in seccomp profile is Docker's default and is verified from
-	// the capability report, so the adapter must never disable it.
-	if spec.Limits.MemoryBytes > 0 {
-		args = append(args, "--memory", strconv.FormatInt(spec.Limits.MemoryBytes, 10))
-	}
-	if spec.Limits.Pids > 0 {
-		args = append(args, "--pids-limit", strconv.Itoa(spec.Limits.Pids))
-	}
-	if spec.Limits.FileSizeBytes > 0 {
-		args = append(args, "--ulimit", "fsize="+strconv.FormatInt(spec.Limits.FileSizeBytes, 10))
-	}
-	if spec.Limits.OpenFiles > 0 {
-		args = append(args, "--ulimit", "nofile="+strconv.Itoa(spec.Limits.OpenFiles))
-	}
-	for _, mount := range spec.Tmpfs {
-		args = append(args, "--tmpfs", mount.Path+":"+mount.option())
-	}
-
-	args = append(args,
-		"-e", EnvSession+"="+spec.Session,
-		"-e", EnvControlUID+"="+strconv.FormatUint(uint64(spec.ControlUID), 10),
-		"-e", EnvApplicationUID+"="+strconv.FormatUint(uint64(spec.ApplicationUID), 10),
-		spec.Image,
-	)
-	args = append(args, spec.Command...)
+	args := createArgs(spec)
 
 	out, err := d.output(ctx, d.context, "engine.create", args...)
 	if err != nil {
@@ -445,7 +430,10 @@ func captureStderr(caller io.Writer) (*boundedBuffer, io.Writer) {
 
 // missingContainer reports the CLI's answer for a container that no longer
 // exists. Unlike the engine API, the CLI has no structured reason, so its text
-// is the only signal available; anything else is a real failure.
+// is the only signal available; anything else is a real failure. Docker and
+// Podman word the condition differently ("no such object", "no such image",
+// "no such container", "no container with name or ID ... found") and all of
+// them map to the same ErrNotFound.
 func missingContainer(err error, id string) error {
 	var failure *result.Failure
 	if !errors.As(err, &failure) || failure.Code != result.CodeEngineUnavailable {
@@ -453,7 +441,10 @@ func missingContainer(err error, id string) error {
 	}
 
 	stderr := strings.ToLower(failure.Details["stderr"])
-	if strings.Contains(stderr, "no such object") || strings.Contains(stderr, "no such container") {
+	if strings.Contains(stderr, "no such object") ||
+		strings.Contains(stderr, "no such container") ||
+		strings.Contains(stderr, "no such image") ||
+		strings.Contains(stderr, "no container with name or id") {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	return err

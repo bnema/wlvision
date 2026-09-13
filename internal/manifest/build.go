@@ -44,8 +44,13 @@ const (
 type BuildPlan struct {
 	// ManifestDir is the manifest's directory with symbolic links resolved.
 	ManifestDir string
-	// Image is the digest-pinned base image.
+	// Image is the digest-pinned base image, or the reference to an image
+	// the engine already holds when Digest is set.
 	Image string
+	// Digest is the base.digest an engine-held base image must report. It is
+	// empty when Image carries its own digest, so the Containerfile needs no
+	// change for either form.
+	Digest string
 	// Tag is the image tag a build creates.
 	Tag string
 	// AllowNetwork permits network access during the build only.
@@ -117,6 +122,7 @@ func Plan(manifest Manifest) (BuildPlan, error) {
 	plan := BuildPlan{
 		ManifestDir:  manifest.realDir,
 		Image:        manifest.Base.Image,
+		Digest:       manifest.Base.Digest,
 		AllowNetwork: manifest.Base.AllowNetwork,
 		Packages:     packages,
 		Command:      append([]string(nil), manifest.Application.Command...),
@@ -241,12 +247,30 @@ func Stage(ctx context.Context, plan BuildPlan, stagingDir string) error {
 // output. A failed build is an image_unavailable failure carrying the tail of
 // that output, so a caller sees why the image could not be produced without
 // re-running the build.
+//
+// When the base is an image the engine already holds rather than a
+// digest-pinned reference, the engine's identifier for that reference is read
+// first and must equal the plan's digest: a locally built base is pinned the
+// same way a registry digest pins one, and a mismatch is refused before the
+// build starts.
 func Build(ctx context.Context, containerEngine engine.Engine, plan BuildPlan, stagingDir string) (Result, error) {
 	if containerEngine == nil {
 		return Result{}, errors.New("manifest: an engine is required")
 	}
 	if plan.Tag == "" {
 		return Result{}, errors.New("manifest: the plan carries no image tag; call Plan first")
+	}
+	if plan.Digest != "" {
+		imageID, err := containerEngine.ImageID(ctx, plan.Image)
+		if err != nil {
+			return Result{}, result.NewFailure(result.CodeImageUnavailable, "manifest.build",
+				"the base image %q is not available in the engine: %v", plan.Image, err)
+		}
+		imageID = strings.TrimSpace(imageID)
+		if imageID != plan.Digest {
+			return Result{}, result.NewFailure(result.CodeImageUnavailable, "manifest.build",
+				"the base image %q has id %q, but the manifest pins %q", plan.Image, imageID, plan.Digest)
+		}
 	}
 	if err := Stage(ctx, plan, stagingDir); err != nil {
 		return Result{}, err

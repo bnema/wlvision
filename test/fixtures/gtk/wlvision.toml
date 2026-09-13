@@ -1,0 +1,29 @@
+# wlvision manifest fixture: the smallest real GTK application a session can run.
+#
+# The base is the session image the harness builds locally. That image has no
+# registry digest, so it is pinned by the exact image id `docker image inspect`
+# reports (`base.digest`); `FROM sha256:<id>` does not resolve under BuildKit,
+# which is why the second base form exists. The gate substitutes the placeholder
+# below with the id of the image it runs against, so this file is the single
+# source of truth for everything except that volatile id (see README.md).
+schema = "wlvision-manifest/v1"
+
+[base]
+image = "wlvision-session:local"
+digest = "sha256:REPLACE_WITH_SESSION_IMAGE_ID"
+
+# zenity's GTK4/libadwaita dependency tree is not in the pinned session image,
+# so the build needs the network. The session that runs the result never does:
+# the schema has no runtime network key at all, and base.allow_network affects
+# the build alone.
+allow_network = true
+packages = ["zenity"]
+
+[application]
+# The default command is the fixture dialog; the gate runs the same command
+# explicitly through `wlvision run`, which is the path an agent takes.
+command = ["/usr/bin/zenity", "--entry", "--title=wlvision-gtk-fixture", "--text=Type a word and press Return"]
+
+# Weston is Wayland-only, so pin GTK to it: without this GTK would try X11 and
+# fail in a session that has no X server.
+env = ["GDK_BACKEND=wayland"]

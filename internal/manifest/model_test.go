@@ -16,6 +16,30 @@ import (
 // not a real image: no test here contacts an engine.
 const digest = "docker.io/library/archlinux@sha256:6d9b8f3c2a1e4f5d7c8b9a0e1f2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5"
 
+// localImageID is the identifier an engine reports for a locally built image,
+// which is how a base without a registry digest is pinned.
+const localImageID = "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcdef"
+
+// localBaseBody pins a base the engine already holds, the form used for a
+// locally built session image with no RepoDigests entry.
+func localBaseBody() string {
+	return `
+schema = "wlvision-manifest/v1"
+
+[base]
+image = "wlvision-runtime:local"
+digest = "` + localImageID + `"
+
+[application]
+command = ["/app/example"]
+
+[copy]
+sources = [
+  { from = "app.bin", to = "/app/example", mode = "0755" },
+]
+`
+}
+
 // validManifestBody is a manifest every fixture path in the tests satisfies.
 func validManifestBody() string {
 	return `
@@ -180,6 +204,21 @@ func TestLoadRefusals(t *testing.T) {
 			field: "copy.sources[1].to",
 		},
 		{
+			name:  "local reference without any digest",
+			body:  strings.Replace(base, `image = "`+digest+`"`, `image = "wlvision-runtime:local"`, 1),
+			field: "base.image",
+		},
+		{
+			name:  "malformed local digest",
+			body:  strings.Replace(localBaseBody(), localImageID, "sha256:nothex", 1),
+			field: "base.digest",
+		},
+		{
+			name:  "digest declared beside a reference digest",
+			body:  strings.Replace(base, "allow_network = true", "allow_network = true\ndigest = \""+localImageID+"\"", 1),
+			field: "base.digest",
+		},
+		{
 			name:  "runtime network key",
 			body:  base + "\n[runtime]\nnetwork = true\n",
 			field: "runtime.network",
@@ -283,6 +322,34 @@ func TestLoadRefusesAnUnknownSchema(t *testing.T) {
 	}
 	if !strings.Contains(failure.Message, "schema") {
 		t.Errorf("message %q does not name the schema field", failure.Message)
+	}
+}
+
+func TestLoadValidLocalBase(t *testing.T) {
+	dir := project(t)
+	loaded, err := Load(writeManifest(t, dir, localBaseBody()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Base.Image != "wlvision-runtime:local" {
+		t.Errorf("Base.Image = %q, want the engine-held reference", loaded.Base.Image)
+	}
+	if loaded.Base.Digest != localImageID {
+		t.Errorf("Base.Digest = %q, want %q", loaded.Base.Digest, localImageID)
+	}
+
+	planned, err := Plan(loaded)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if planned.Digest != localImageID {
+		t.Errorf("Digest = %q, want the verified local image id", planned.Digest)
+	}
+	if !strings.Contains(string(planned.Containerfile), "FROM wlvision-runtime:local") {
+		t.Errorf("the Containerfile must name the reference it builds from:\n%s", planned.Containerfile)
+	}
+	if strings.Contains(string(planned.Containerfile), localImageID) {
+		t.Errorf("the Containerfile must not need the image id:\n%s", planned.Containerfile)
 	}
 }
 

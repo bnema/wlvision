@@ -13,8 +13,21 @@
 schema = "wlvision-manifest/v1"
 
 [base]
-# Required. The base must be digest-pinned: a tag moves, and a session records
-# the bytes it actually ran. Replace the digest below with the one you pinned.
+# Required. A digest-pinned reference is one way to pin the base: a tag moves,
+# and a session records the bytes it actually ran. Replace the digest below with
+# the one you pinned.
+#
+# When the base is an image the engine already holds — for example a locally
+# built session image with no registry digest — name the reference and pin the
+# exact image id that `docker image inspect --format '{{.Id}}'` reports:
+#
+#   [base]
+#   image = "wlvision-runtime:local"
+#   digest = "sha256:<the image id the engine reports>"
+#
+# The generated Containerfile still uses the reference in FROM; the id is
+# verified against the engine before the build starts, so a tag that moved is
+# refused. base.digest must be absent when image already carries a digest.
 image = "docker.io/library/archlinux@sha256:6d9b8f3c2a1e4f5d7c8b9a0e1f2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5"
 # Optional. Installed in one transaction before any source is copied.
 packages = ["gtk4", "sqlite"]
