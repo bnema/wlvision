@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bnema/wlvision/internal/engine"
 	"github.com/bnema/wlvision/internal/enginetest"
@@ -518,5 +519,74 @@ func TestParseSize(t *testing.T) {
 		if got != testCase.want {
 			t.Errorf("parseSize(%q) = %d, want %d", testCase.text, got, testCase.want)
 		}
+	}
+}
+
+// A retained session is released once its retention deadline passes, which is
+// what keeps a crashed or failed session from becoming permanent state.
+func TestSessionPurgeReleasesRetainedSessions(t *testing.T) {
+	fake := enginetest.New()
+	harness := newHarness(t, fake)
+
+	// A session whose retention window is already over.
+	if err := harness.store.Save(session.Record{
+		Schema:            result.Schema,
+		Session:           "expired",
+		ContainerName:     session.ContainerName("expired"),
+		State:             session.StateFailed,
+		RetentionDeadline: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("seed the expired session: %v", err)
+	}
+	// A session that is still within its window.
+	if err := harness.store.Save(session.Record{
+		Schema:            result.Schema,
+		Session:           "retained",
+		ContainerName:     session.ContainerName("retained"),
+		State:             session.StateFailed,
+		RetentionDeadline: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("seed the retained session: %v", err)
+	}
+
+	code, stdout, stderr := harness.run(t, "--json", "session", "purge")
+	if code != 0 {
+		t.Fatalf("purge exited %d (stderr: %s)", code, stderr)
+	}
+
+	envelope := decodeEnvelope(t, stdout)
+	if !envelope.Ok || envelope.Operation != "session.purge" {
+		t.Fatalf("envelope = %+v, want an accepted purge", envelope)
+	}
+	if !strings.Contains(string(envelope.Result), `"expired"`) {
+		t.Errorf("purge result = %s, want it to name the released session", envelope.Result)
+	}
+
+	released, err := harness.store.Load("expired")
+	if err != nil {
+		t.Fatalf("load the released session: %v", err)
+	}
+	if released.State != session.StateClosed {
+		t.Errorf("released session state = %s, want closed", released.State)
+	}
+
+	kept, err := harness.store.Load("retained")
+	if err != nil {
+		t.Fatalf("load the retained session: %v", err)
+	}
+	if kept.State != session.StateFailed {
+		t.Errorf("retained session state = %s, want it untouched", kept.State)
+	}
+}
+
+func TestSessionPurgeTakesNoArguments(t *testing.T) {
+	harness := newHarness(t, enginetest.New())
+
+	code, stdout, _ := harness.run(t, "--json", "session", "purge", "now")
+	if code != result.CodeUsageError.ExitCode() {
+		t.Fatalf("exit code = %d, want %d", code, result.CodeUsageError.ExitCode())
+	}
+	if envelope := decodeEnvelope(t, stdout); envelope.Ok {
+		t.Error("a purge with an argument was accepted")
 	}
 }

@@ -187,6 +187,8 @@ func (c *cli) session(args []string) int {
 		return c.sessionInspect(args[1:])
 	case "close":
 		return c.sessionClose(args[1:])
+	case "purge":
+		return c.sessionPurge(args[1:])
 	default:
 		return c.usageError("session", "", fmt.Errorf("unknown session subcommand %q", args[0]))
 	}
@@ -348,6 +350,44 @@ func (c *cli) sessionClose(args []string) int {
 		return c.fail(operation, id, err, result.CodeSessionNotReady)
 	}
 	return c.success(operation, id, record.Revision, record)
+}
+
+// purgeResult reports which retained sessions cleanup released.
+type purgeResult struct {
+	Purged  []string `json:"purged,omitempty"`
+	Message string   `json:"message,omitempty"`
+}
+
+// sessionPurge closes every session whose retention deadline has passed. It is
+// what keeps a crashed or failed session from becoming permanent state: a run
+// that is retained for diagnosis is released once it has been diagnosable for
+// as long as the caller asked for.
+func (c *cli) sessionPurge(args []string) int {
+	const operation = "session.purge"
+
+	flags := c.flagSet("wlvision session purge")
+	if err := flags.Parse(args); err != nil {
+		return c.usageError(operation, "", err)
+	}
+	if flags.NArg() > 0 {
+		return c.usageError(operation, "", fmt.Errorf("unexpected argument %q", flags.Arg(0)))
+	}
+
+	service, err := c.newService()
+	if err != nil {
+		return c.fail(operation, "", err, result.CodeEngineUnavailable)
+	}
+
+	purged, err := service.Purge(c.ctx)
+	if err != nil {
+		return c.fail(operation, "", err, result.CodeSessionNotReady)
+	}
+
+	message := "nothing was past its retention deadline"
+	if len(purged) > 0 {
+		message = fmt.Sprintf("released %d session(s)", len(purged))
+	}
+	return c.success(operation, "", 0, purgeResult{Purged: purged, Message: message})
 }
 
 func (c *cli) runApplication(args []string) int {
