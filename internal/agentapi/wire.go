@@ -7,7 +7,22 @@
 // names and argument fields, and neither may drift from the other.
 package agentapi
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
+
+// Caller exchanges one operation with a session's resident controller.
+//
+// It is the boundary the interaction and temporal-vision services are written
+// against: they describe what to ask the session, not how the request reaches
+// it. internal/session implements it over a container exec, and a test
+// implements it with a fake, so neither package needs an engine to be tested.
+type Caller interface {
+	// Call sends one operation and returns the controller's reply. A failure
+	// the controller reported arrives as a *result.Failure.
+	Call(ctx context.Context, operation string, params Params) (Reply, error)
+}
 
 // Operations the resident controller serves. They mirror the control facade.
 const (
