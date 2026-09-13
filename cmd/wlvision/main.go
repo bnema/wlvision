@@ -131,6 +131,32 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return command.inject(remaining[1:])
 	case "logs":
 		return command.logs(remaining[1:])
+	case "windows":
+		return command.windows(remaining[1:])
+	case "activate":
+		return command.activate(remaining[1:])
+	case "move":
+		return command.move(remaining[1:])
+	case "resize":
+		return command.resize(remaining[1:])
+	case "close-window":
+		return command.closeWindow(remaining[1:])
+	case "click":
+		return command.click(remaining[1:])
+	case "pointer":
+		return command.pointer(remaining[1:])
+	case "scroll":
+		return command.scroll(remaining[1:])
+	case "key":
+		return command.key(remaining[1:])
+	case "type":
+		return command.typeText(remaining[1:])
+	case "screenshot":
+		return command.screenshot(remaining[1:])
+	case "capture":
+		return command.captureBurst(remaining[1:])
+	case "wait":
+		return command.wait(remaining[1:])
 	default:
 		return command.usageError(remaining[0], "", fmt.Errorf("unknown command %q", remaining[0]))
 	}
@@ -739,6 +765,25 @@ Commands:
   run --session ID [--ephemeral] [--workdir DIR] [--env K=V]... [--ready-timeout DURATION] -- CMD [ARGS...]
   inject --session ID (--binary NAME | --bundle NAME) [--mode OCTAL] [--max-bytes N] [--max-files N]
   logs --session ID [--tail N]
+
+Windows and input:
+  windows --session ID
+  activate --session ID --window HANDLE [--revision R]
+  move --session ID --window HANDLE --x F --y F [--revision R]
+  resize --session ID --window HANDLE --width N --height N [--revision R] [--timeout DURATION]
+  close-window --session ID --window HANDLE [--revision R]
+  click --session ID --window HANDLE --x F --y F [--button N] [--revision R]
+  pointer --session ID (--x F --y F | --button N --state pressed|released | --axis N --value F)
+  scroll --session ID [--axis N] --value F
+  key --session ID (--keycode N | --name NAME) [--state pressed|released]
+  type --session ID TEXT
+
+Capture and timing:
+  screenshot --session ID [--output NAME]
+  capture --session ID [--interval DURATION] [--duration DURATION] [--frames N] [--output DIR] [--contact-sheet]
+  wait --session ID (--stable-for DURATION | --window-count N | --process-exit | --new-frame SEQ | --window HANDLE [--width N --height N]) [--timeout DURATION]
+
+Coordinates passed with --window are window-content pixels; --revision names the layout the caller saw and is refused with stale_revision if it moved. Without --state, key sends a press and a release. Screenshots and captures are written under the session's export directory; --output names an artifact inside it.
 
 Sizes accept a plain byte count or a k, m, or g suffix (1024-based).
 Durations accept Go duration strings such as 30s, 5m, or 1h.

@@ -127,10 +127,20 @@ type DoctorReport struct {
 	Image        string              `json:"image"`
 	ControlUID   uint32              `json:"control_uid"`
 	AppUID       uint32              `json:"application_uid"`
+	Keyboard     KeyboardReport      `json:"keyboard"`
 	Capabilities engine.Capabilities `json:"capabilities"`
 	Degradations []string            `json:"degradations,omitempty"`
 	Sessions     []Record            `json:"sessions,omitempty"`
 	Anomalies    []Anomaly           `json:"anomalies,omitempty"`
+}
+
+// KeyboardReport is the keyboard layout a session guarantees. It is a property
+// of the pinned session image, not of the host, because the control protocol
+// injects evdev keycodes that only the compositor's keymap can interpret.
+type KeyboardReport struct {
+	Rules  string `json:"rules"`
+	Model  string `json:"model"`
+	Layout string `json:"layout"`
 }
 
 // Doctor inspects the engine and reconciles every stored session.
@@ -150,6 +160,7 @@ func (s *Service) Doctor(ctx context.Context) (DoctorReport, error) {
 		Image:        s.image,
 		ControlUID:   s.controlUID,
 		AppUID:       s.applicationUID,
+		Keyboard:     KeyboardReport{Rules: KeyboardRules, Model: KeyboardModel, Layout: KeyboardLayout},
 		Capabilities: capabilities,
 		Degradations: capabilities.Degradations(),
 		Sessions:     records,

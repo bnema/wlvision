@@ -82,6 +82,18 @@ func (s *Service) Call(ctx context.Context, id, operation string, params agentap
 	return reply, nil
 }
 
+// Record returns the stored record of one session without reconciling it
+// against the engine.
+//
+// It exists for a caller that polls a cheap signal, such as the recorded exit
+// of an application, where asking the engine on every poll would be wasteful.
+func (s *Service) Record(id string) (Record, error) { return s.store.Load(id) }
+
+// StateRoot reports the directory the session records live under. It is also
+// where wlvision keeps the artifacts an agent asks for, so a caller resolves an
+// export tree against it rather than recomputing the default.
+func (s *Service) StateRoot() string { return s.store.Root() }
+
 // Caller returns the resident controller of one session, reached one operation
 // at a time.
 //

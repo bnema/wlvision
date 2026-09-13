@@ -364,6 +364,22 @@ func (s *Supervisor) prepare() error {
 			return fmt.Errorf("supervisor: cannot set the mode of %s: %w", directory.path, err)
 		}
 	}
+
+	return s.writeCompositorConfig()
+}
+
+// writeCompositorConfig records the configuration Weston runs with.
+//
+// The keyboard section pins the layout the session guarantees: the control
+// protocol injects evdev keycodes, so what a key means is decided by the keymap
+// the compositor hands to its clients. Keeping that decision in the session
+// configuration, rather than in the host's xkb defaults, is what makes typing
+// reproducible across hosts.
+func (s *Supervisor) writeCompositorConfig() error {
+	path := filepath.Join(s.options.ControlDir, filepath.Base(session.WestonConfigPath))
+	if err := os.WriteFile(path, []byte(session.WestonConfig), 0o600); err != nil {
+		return fmt.Errorf("supervisor: cannot write the compositor configuration: %w", err)
+	}
 	return nil
 }
 
@@ -379,10 +395,20 @@ func (s *Supervisor) startCompositor() error {
 		"--height=" + strconv.Itoa(s.options.Height),
 		"--idle-time=0",
 		"--socket=" + s.options.Display,
+		"--config=" + filepath.Join(s.options.ControlDir, filepath.Base(session.WestonConfigPath)),
 	}
 	env := append(os.Environ(),
 		session.EnvRuntimeDir+"="+s.options.WaylandDir,
 		"WLVISION_SHELL_LOG=1",
+		// The configuration file already pins the layout; the environment is
+		// repeated here so a compositor that ignored its configuration would
+		// still create the same keymap, and so the layout never depends on the
+		// host's defaults.
+		"XKB_DEFAULT_RULES="+session.KeyboardRules,
+		"XKB_DEFAULT_MODEL="+session.KeyboardModel,
+		"XKB_DEFAULT_LAYOUT="+session.KeyboardLayout,
+		"XKB_DEFAULT_VARIANT=",
+		"XKB_DEFAULT_OPTIONS=",
 	)
 
 	child, err := s.start("compositor", argv, env)

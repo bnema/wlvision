@@ -37,6 +37,49 @@ const (
 	CallPath = "/usr/libexec/wlvision-call"
 )
 
+// The keyboard layout a session guarantees.
+//
+// The control protocol injects evdev keycodes, so what a key means is decided
+// by the keymap the compositor hands to its clients. The supervisor therefore
+// pins this RMLVO for the compositor: the same values the keymap artifact the
+// CLI resolves text and key names with is generated from. Without it the
+// layout would be whatever the host's xkb defaults happen to be.
+const (
+	// KeyboardRules is the xkb rules set the session uses.
+	KeyboardRules = "evdev"
+	// KeyboardModel is the xkb model the session uses.
+	KeyboardModel = "pc105"
+	// KeyboardLayout is the layout V1 guarantees.
+	KeyboardLayout = "us"
+	// KeyboardVariant and KeyboardOptions are deliberately empty: the layout is
+	// the plain US one, with no variant and no options.
+	KeyboardVariant = ""
+	KeyboardOptions = ""
+	// WestonConfigPath is the compositor configuration the supervisor writes.
+	// It lives in the control directory, which only the control identity can
+	// read, because it is part of the session's privileged state.
+	WestonConfigPath = ControlDir + "/weston.ini"
+)
+
+// WestonConfig is the compositor configuration of a session, byte for byte.
+//
+// It is a constant rather than generated text so the layout a session runs with
+// is readable in one place, next to the constants the CLI's keymap artifact is
+// generated from.
+const WestonConfig = `# wlvision session compositor configuration.
+#
+# The keyboard section pins the layout the session guarantees. The control
+# protocol injects evdev keycodes, and a client can only interpret them with the
+# keymap the compositor hands out, so the layout must be a property of the
+# pinned session image rather than of the host.
+[keyboard]
+keymap_rules=` + KeyboardRules + `
+keymap_model=` + KeyboardModel + `
+keymap_layout=` + KeyboardLayout + `
+keymap_variant=
+keymap_options=
+`
+
 // Environment passed to application processes so they reach the compositor
 // without learning anything else about the session.
 const (
