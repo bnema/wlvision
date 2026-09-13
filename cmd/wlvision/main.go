@@ -40,8 +40,8 @@ func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr, newService))
 }
 
-// newDockerService is the production factory: a Docker CLI adapter plus a store
-// under the configured state root.
+// newDockerService is the production factory: the selected engine adapter plus
+// a store under the configured state root.
 func newDockerService(options session.Options, globals globalFlags) (*session.Service, error) {
 	stateRoot := globals.stateRoot
 	if stateRoot == "" {
@@ -55,11 +55,23 @@ func newDockerService(options session.Options, globals globalFlags) (*session.Se
 	if err != nil {
 		return nil, err
 	}
-	docker, err := engine.NewDocker(engine.CLIRunner{Binary: "docker"}, engine.Options{Context: globals.context})
+
+	engineOptions := engine.Options{Context: globals.context}
+	var adapter engine.Engine
+	switch engine.Kind(globals.engine) {
+	case engine.KindDocker, "":
+		adapter, err = engine.NewDocker(engine.CLIRunner{Binary: "docker"}, engineOptions)
+	case engine.KindPodman:
+		adapter, err = engine.NewPodman(engine.CLIRunner{Binary: "podman"}, engineOptions)
+	default:
+		return nil, result.NewFailure(result.CodeUsageError, "wlvision",
+			"--engine must be %s or %s, got %q", engine.KindDocker, engine.KindPodman, globals.engine)
+	}
 	if err != nil {
 		return nil, err
 	}
-	options.Engine = docker
+
+	options.Engine = adapter
 	options.Store = store
 	return session.NewService(options)
 }
@@ -71,6 +83,9 @@ type globalFlags struct {
 	stateRoot string
 	image     string
 	context   string
+	// engine selects the container engine adapter. Docker stays the default;
+	// podman is asked for explicitly, or selected through the configuration.
+	engine string
 }
 
 func parseGlobals(args []string) (globalFlags, []string, error) {
@@ -81,7 +96,8 @@ func parseGlobals(args []string) (globalFlags, []string, error) {
 	flags.BoolVar(&globals.json, "json", false, "write one JSON envelope on stdout")
 	flags.StringVar(&globals.stateRoot, "state-root", "", "session state directory")
 	flags.StringVar(&globals.image, "image", "", "session image reference")
-	flags.StringVar(&globals.context, "context", "", "container engine context")
+	flags.StringVar(&globals.context, "context", "", "container engine context (docker) or connection (podman)")
+	flags.StringVar(&globals.engine, "engine", string(engine.KindDocker), "container engine: docker or podman")
 	if err := flags.Parse(args); err != nil {
 		return globals, nil, err
 	}
@@ -754,7 +770,8 @@ Global options (before the command):
   --json                 write one JSON envelope on stdout
   --state-root DIR       session state directory (default $XDG_STATE_HOME/wlvision)
   --image REF            session image (default ` + session.DefaultImage + `)
-  --context NAME         container engine context
+  --context NAME         container engine context (docker) or connection (podman)
+  --engine NAME          container engine: docker (default) or podman
 
 Commands:
   doctor
@@ -762,6 +779,7 @@ Commands:
   session list
   session inspect --session ID
   session close --session ID [--stop-timeout DURATION]
+  session purge
   run --session ID [--ephemeral] [--workdir DIR] [--env K=V]... [--ready-timeout DURATION] -- CMD [ARGS...]
   inject --session ID (--binary NAME | --bundle NAME) [--mode OCTAL] [--max-bytes N] [--max-files N]
   logs --session ID [--tail N]

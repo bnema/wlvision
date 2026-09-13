@@ -33,6 +33,13 @@ const (
 	// CodeStaleRevision means the request carried a revision the compositor
 	// has already superseded.
 	CodeStaleRevision Code = "stale_revision"
+	// CodeNotAuthorized means the session refused the request because the
+	// caller is not the identity the operation is reserved for.
+	CodeNotAuthorized Code = "not_authorized"
+	// CodeCaptureUnavailable means the compositor cannot capture right now, for
+	// example because an output produces nothing or the capture source was
+	// retired.
+	CodeCaptureUnavailable Code = "capture_unavailable"
 	// CodeCaptureFailed means capture was authorized but did not produce a
 	// frame.
 	CodeCaptureFailed Code = "capture_failed"
@@ -59,6 +66,8 @@ var allCodes = []Code{
 	CodeSessionNotReady,
 	CodeWindowNotFound,
 	CodeStaleRevision,
+	CodeNotAuthorized,
+	CodeCaptureUnavailable,
 	CodeCaptureFailed,
 	CodeWaitTimeout,
 	CodeProcessExited,
@@ -91,7 +100,7 @@ func (c Code) ExitCode() int {
 	case CodeWaitTimeout:
 		return 5
 	case CodePayloadRejected, CodeSessionNotReady, CodeWindowNotFound,
-		CodeStaleRevision, CodeCaptureFailed, CodeProcessExited:
+		CodeStaleRevision, CodeNotAuthorized, CodeCaptureUnavailable, CodeCaptureFailed, CodeProcessExited:
 		return 4
 	default:
 		return 4
@@ -111,7 +120,7 @@ func (c Code) ExitCode() int {
 func (c Code) Fatal() bool {
 	switch c {
 	case CodeEngineNotRootless, CodeImageUnavailable, CodeWestonProtocolMismatch, CodeUsageError,
-		CodePayloadRejected, CodeWindowNotFound, CodeStaleRevision:
+		CodePayloadRejected, CodeWindowNotFound, CodeStaleRevision, CodeNotAuthorized:
 		return true
 	default:
 		return false

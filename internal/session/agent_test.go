@@ -132,6 +132,30 @@ func TestCallRefusesASessionThatCannotInteract(t *testing.T) {
 	}
 }
 
+func TestCallReportsACallerDeadlineAsATimeout(t *testing.T) {
+	service, fake := readyService(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A deadline kills the container exec, which is what the engine reports as
+	// a failed command. The failure the caller must see is the timeout, not an
+	// unavailable engine.
+	fake.ExecFunc = func(engine.ExecSpec) (engine.ExecResult, error) {
+		cancel()
+		return engine.ExecResult{}, errors.New("the container engine command failed: signal: killed")
+	}
+
+	_, err := service.Call(ctx, "demo", agentapi.OpResize, agentapi.Params{Width: 640, Height: 480})
+	failure := failureOfSession(t, err)
+	if failure.Code != result.CodeWaitTimeout {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeWaitTimeout)
+	}
+	if failure.Operation != agentapi.OpResize {
+		t.Errorf("operation = %q, want the operation that timed out", failure.Operation)
+	}
+}
+
 func TestCallerBindsOneSession(t *testing.T) {
 	service, fake := readyService(t)
 

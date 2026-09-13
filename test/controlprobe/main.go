@@ -120,14 +120,29 @@ func run(ctx context.Context) int {
 	check("activate on an unknown handle is refused as window_not_found",
 		errors.Is(err, control.ErrWindowNotFound), errText(err))
 
-	// Resize completes only once the application commits a matching buffer.
+	// Resize completes only once the application commits the buffer it was
+	// configured with. The requested, configured, committed and visible sizes
+	// each come from their own source: configured is set by resize_configured,
+	// committed and visible by resize_done.
+	//
+	// The fixture (test/weston-shell/wlvision-shell-client.c) derives every
+	// buffer it commits from the configure it was sent, so it cannot be driven
+	// into committing a size different from its configure, and a single resize
+	// cannot time out here. The deadline path is proven deterministically
+	// against the fake compositor instead (internal/control/client_test.go);
+	// this gate proves the four sizes on a real configure-to-commit round trip.
 	wanted := control.Size{Width: 400, Height: 300}
 	resize, err := client.Resize(ctx, window.Handle, wanted, client.Revision())
 	if !check("resize completes after the application commits", err == nil, errText(err)) {
 		return 1
 	}
-	check("the committed size is the requested one", resize.Visible == wanted,
-		fmt.Sprintf("requested %s, visible %s", resize.Requested, resize.Visible))
+	fmt.Printf("INFO: resize requested=%s configured=%s committed=%s visible=%s revision=%d\n",
+		resize.Requested, resize.Configured, resize.Committed, resize.Visible, resize.Revision)
+	check("resize reports the requested, configured, committed and visible sizes",
+		resize.Requested == wanted && resize.Configured == wanted &&
+			resize.Committed == wanted && resize.Visible == wanted,
+		fmt.Sprintf("requested=%s configured=%s committed=%s visible=%s, want all %s",
+			resize.Requested, resize.Configured, resize.Committed, resize.Visible, wanted))
 
 	// Input injection is accepted, and the connection survives it.
 	motionErr := client.Pointer(ctx, control.PointerEvent{

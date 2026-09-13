@@ -34,6 +34,12 @@ func (c *cli) exportTree(service *session.Service, id string) (*export.Tree, err
 	return export.Open(service.StateRoot(), id)
 }
 
+// resizeGrace is how long a resize may outlive the budget it asked the session
+// for. The session answers at its own deadline with what it observed; the extra
+// margin is what lets that answer arrive instead of the container exec being
+// killed underneath it.
+const resizeGrace = 2 * time.Second
+
 // windowTarget collects the --window and --revision flags every window command
 // takes.
 type windowTarget struct {
@@ -183,18 +189,22 @@ func (c *cli) resize(args []string) int {
 	// A resize completes only once the application committed a matching buffer,
 	// so a successful result is the size taking effect, not a configure being
 	// sent. A caller that wants to bound how long it waits for that commit passes
-	// --timeout; the failure then reports what the session observed.
+	// --timeout: the session is told that budget and answers with what it
+	// observed, and the caller's own context allows a grace margin beyond it so
+	// the detailed failure arrives instead of a killed exec.
 	ctx := c.ctx
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	resized, err := service.Resize(ctx, input.ResizeRequest{
+	request := input.ResizeRequest{
 		Target: target.target(),
 		Width:  uint32(width),
 		Height: uint32(height),
-	})
+	}
+	if timeout > 0 {
+		request.TimeoutMS = uint32(timeout / time.Millisecond)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout+resizeGrace)
+		defer cancel()
+	}
+	resized, err := service.Resize(ctx, request)
 	if err != nil {
 		return c.fail(operation, id, err, result.CodeWaitTimeout)
 	}

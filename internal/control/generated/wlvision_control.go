@@ -86,6 +86,8 @@ type WlvisionController struct {
 	onRequestFailed     []func(requestId uint32, code uint32, message string)
 	onFrame             []func(captureRequestId uint32, frameSequence uint32)
 	onCaptureAuthorized []func(captureRequestId uint32)
+	onResizeConfigured  []func(requestId uint32, width int32, height int32)
+	onResizeDone        []func(requestId uint32, configuredWidth int32, configuredHeight int32, committedWidth int32, committedHeight int32, visibleWidth int32, visibleHeight int32, revisionHi uint32, revisionLo uint32)
 }
 
 // NewWlvisionController returns an unbound WlvisionController.
@@ -120,7 +122,7 @@ func (o *WlvisionController) Move(requestId uint32, handle string, revisionHi ui
 	return nil
 }
 
-// Completes only after the application commits a buffer matching the configure sequence, or when the caller's timeout expires.
+// Answers with resize_configured once the module has configured the application, then with resize_done only after the application commits a buffer matching that configure, or with request_failed when the request is refused. A caller whose deadline expires learns what the module last observed from its own timeout, not from this interface.
 func (o *WlvisionController) Resize(requestId uint32, handle string, revisionHi uint32, revisionLo uint32, width uint32, height uint32) error {
 	if err := o.Context().SendRequest(o, 3, requestId, handle, revisionHi, revisionLo, width, height); err != nil {
 		return err
@@ -318,6 +320,44 @@ func (o *WlvisionController) handlersForCaptureAuthorized() []func(captureReques
 	return append([]func(captureRequestId uint32){}, o.onCaptureAuthorized...)
 }
 
+// OnResizeConfigured registers a handler for the resize_configured event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
+func (o *WlvisionController) OnResizeConfigured(handler func(requestId uint32, width int32, height int32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	o.onResizeConfigured = append(o.onResizeConfigured, handler)
+}
+
+// handlersForResizeConfigured returns the handlers registered for resize_configured, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForResizeConfigured() []func(requestId uint32, width int32, height int32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(requestId uint32, width int32, height int32){}, o.onResizeConfigured...)
+}
+
+// OnResizeDone registers a handler for the resize_done event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
+func (o *WlvisionController) OnResizeDone(handler func(requestId uint32, configuredWidth int32, configuredHeight int32, committedWidth int32, committedHeight int32, visibleWidth int32, visibleHeight int32, revisionHi uint32, revisionLo uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	o.onResizeDone = append(o.onResizeDone, handler)
+}
+
+// handlersForResizeDone returns the handlers registered for resize_done, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForResizeDone() []func(requestId uint32, configuredWidth int32, configuredHeight int32, committedWidth int32, committedHeight int32, visibleWidth int32, visibleHeight int32, revisionHi uint32, revisionLo uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(requestId uint32, configuredWidth int32, configuredHeight int32, committedWidth int32, committedHeight int32, visibleWidth int32, visibleHeight int32, revisionHi uint32, revisionLo uint32){}, o.onResizeDone...)
+}
+
 // Dispatch decodes one event on wlvision_controller_v1 and calls the registered handlers.
 func (o *WlvisionController) Dispatch(event *wl.Event) {
 	switch event.Opcode {
@@ -370,6 +410,26 @@ func (o *WlvisionController) Dispatch(event *wl.Event) {
 		captureRequestId := event.Uint32()
 		for _, handler := range o.handlersForCaptureAuthorized() {
 			handler(captureRequestId)
+		}
+	case 7: // resize_configured
+		requestId := event.Uint32()
+		width := event.Int32()
+		height := event.Int32()
+		for _, handler := range o.handlersForResizeConfigured() {
+			handler(requestId, width, height)
+		}
+	case 8: // resize_done
+		requestId := event.Uint32()
+		configuredWidth := event.Int32()
+		configuredHeight := event.Int32()
+		committedWidth := event.Int32()
+		committedHeight := event.Int32()
+		visibleWidth := event.Int32()
+		visibleHeight := event.Int32()
+		revisionHi := event.Uint32()
+		revisionLo := event.Uint32()
+		for _, handler := range o.handlersForResizeDone() {
+			handler(requestId, configuredWidth, configuredHeight, committedWidth, committedHeight, visibleWidth, visibleHeight, revisionHi, revisionLo)
 		}
 	default:
 	}

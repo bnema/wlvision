@@ -10,6 +10,7 @@ import (
 
 	"github.com/bnema/wlturbo/wl"
 	"github.com/bnema/wlvision/internal/control/generated"
+	"github.com/bnema/wlvision/internal/result"
 )
 
 // ErrClosed is returned when the control connection is closed, either by the
@@ -32,8 +33,11 @@ type Client interface {
 	Move(ctx context.Context, handle Handle, revision Revision, at Point) (State, error)
 
 	// Resize requests a window size. It returns only after the application
-	// committed a matching buffer, so a successful result means the size took
-	// effect and a failure means it did not.
+	// committed a buffer matching the configure the module sent, so a
+	// successful result means the size took effect and a failure means it did
+	// not. When the caller's deadline expires it returns a *result.Failure with
+	// CodeWaitTimeout whose details report what was observed before the
+	// deadline.
 	Resize(ctx context.Context, handle Handle, size Size, revision Revision) (ResizeResult, error)
 
 	// CloseWindow asks a window to close.
@@ -99,13 +103,14 @@ func Connect(ctx context.Context, socketPath string) (Client, error) {
 	}
 
 	c := &client{
-		display:   display,
-		pending:   make(map[uint32]*pendingCall),
-		toplevels: make(map[Handle]Toplevel),
-		removed:   make(map[Handle]struct{}),
-		frames:    make(chan Frame, 64),
-		closed:    make(chan struct{}),
-		done:      make(chan struct{}),
+		display:        display,
+		pending:        make(map[uint32]*pendingCall),
+		toplevels:      make(map[Handle]Toplevel),
+		removed:        make(map[Handle]struct{}),
+		resizeProgress: make(map[uint32]resizeProgress),
+		frames:         make(chan Frame, 64),
+		closed:         make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 
 	manager := generated.NewWlvisionControl(display.Context())
@@ -138,6 +143,7 @@ type pendingKind int
 
 const (
 	waitRequest pendingKind = iota // request_done / request_failed
+	waitResize                     // resize_done / request_failed
 	waitCapture                    // capture_authorized
 )
 
@@ -145,6 +151,25 @@ const (
 type outcome struct {
 	err      error
 	revision Revision
+	resize   *resizeReply
+}
+
+// resizeReply is the payload a resize_done event carried, in the units the
+// module observed them.
+type resizeReply struct {
+	configured Size
+	committed  Size
+	visible    Size
+	revision   Revision
+}
+
+// resizeProgress is the last resize progress the module reported for one
+// request, keyed by that request's ID. A superseded resize therefore never
+// reports its successor's sizes: it can only see what was observed for its own
+// request before the deadline.
+type resizeProgress struct {
+	configured Size
+	committed  Size
 }
 
 // pendingCall is one in-flight request.
@@ -162,13 +187,14 @@ type client struct {
 
 	sendMu sync.Mutex
 
-	mu            sync.Mutex
-	nextRequestID uint32
-	pending       map[uint32]*pendingCall
-	toplevels     map[Handle]Toplevel
-	removed       map[Handle]struct{}
-	revision      Revision
-	closedFlag    bool
+	mu             sync.Mutex
+	nextRequestID  uint32
+	pending        map[uint32]*pendingCall
+	toplevels      map[Handle]Toplevel
+	removed        map[Handle]struct{}
+	resizeProgress map[uint32]resizeProgress
+	revision       Revision
+	closedFlag     bool
 
 	frames chan Frame
 	closed chan struct{}
@@ -245,6 +271,50 @@ func (c *client) registerHandlers(controller *generated.WlvisionController) {
 		})
 	})
 
+	controller.OnResizeConfigured(func(requestID uint32, width, height int32) {
+		if width <= 0 || height <= 0 {
+			return
+		}
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if _, ok := c.pending[requestID]; !ok {
+			return
+		}
+		progress := c.resizeProgress[requestID]
+		progress.configured = Size{Width: uint32(width), Height: uint32(height)}
+		c.resizeProgress[requestID] = progress
+	})
+
+	controller.OnResizeDone(func(requestID uint32, configuredWidth, configuredHeight, committedWidth, committedHeight, visibleWidth, visibleHeight int32, revisionHi, revisionLo uint32) {
+		revision := RevisionFromWords(revisionHi, revisionLo)
+		resize := &resizeReply{
+			configured: sizeFromInt32(configuredWidth, configuredHeight),
+			committed:  sizeFromInt32(committedWidth, committedHeight),
+			visible:    sizeFromInt32(visibleWidth, visibleHeight),
+			revision:   revision,
+		}
+
+		c.mu.Lock()
+		if revision > c.revision {
+			c.revision = revision
+		}
+		if _, ok := c.pending[requestID]; ok {
+			// Record the committed size only for the narrow race where this
+			// handler runs while the caller's deadline fires: send's select may
+			// then pick ctx.Done even though resize_done was delivered, and the
+			// deadline answer should still report what was observed. Every other
+			// path deletes this key in finish immediately.
+			c.resizeProgress[requestID] = resizeProgress{
+				configured: resize.configured,
+				committed:  resize.committed,
+			}
+		}
+		c.mu.Unlock()
+
+		c.finish(requestID, outcome{revision: revision, resize: resize})
+	})
+
 	controller.OnFrame(func(captureRequestID, frameSequence uint32) {
 		frame := Frame{
 			CaptureRequestID: uint64(captureRequestID),
@@ -269,6 +339,7 @@ func (c *client) finish(requestID uint32, result outcome) {
 	if ok {
 		delete(c.pending, requestID)
 	}
+	delete(c.resizeProgress, requestID)
 	c.mu.Unlock()
 
 	if !ok {
@@ -302,12 +373,14 @@ func (c *client) failAll(err error) {
 	}
 }
 
-// send performs one request and waits for its result.
-func (c *client) send(ctx context.Context, kind pendingKind, snapshot *[]Toplevel, issue func(requestID uint32) error) (outcome, error) {
+// send performs one request and waits for its result. It returns the request
+// ID it allocated, so a caller that times out can still identify the progress
+// the module reported for its own request.
+func (c *client) send(ctx context.Context, kind pendingKind, snapshot *[]Toplevel, issue func(requestID uint32) error) (outcome, uint32, error) {
 	c.mu.Lock()
 	if c.closedFlag {
 		c.mu.Unlock()
-		return outcome{}, ErrClosed
+		return outcome{}, 0, ErrClosed
 	}
 	c.nextRequestID++
 	requestID := c.nextRequestID
@@ -321,17 +394,17 @@ func (c *client) send(ctx context.Context, kind pendingKind, snapshot *[]Topleve
 
 	if err != nil {
 		c.forget(requestID)
-		return outcome{}, fmt.Errorf("send request %d: %w", requestID, err)
+		return outcome{}, requestID, fmt.Errorf("send request %d: %w", requestID, err)
 	}
 
 	select {
 	case result := <-call.reply:
-		return result, result.err
+		return result, requestID, result.err
 	case <-ctx.Done():
 		c.forget(requestID)
-		return outcome{}, ctx.Err()
+		return outcome{}, requestID, ctx.Err()
 	case <-c.closed:
-		return outcome{}, ErrClosed
+		return outcome{}, 0, ErrClosed
 	}
 }
 
@@ -343,7 +416,7 @@ func (c *client) forget(requestID uint32) {
 
 func (c *client) Snapshot(ctx context.Context) (State, error) {
 	toplevels := []Toplevel{}
-	result, err := c.send(ctx, waitRequest, &toplevels, func(requestID uint32) error {
+	result, _, err := c.send(ctx, waitRequest, &toplevels, func(requestID uint32) error {
 		return c.controller.Snapshot(requestID)
 	})
 	if err != nil {
@@ -364,7 +437,7 @@ func (c *client) Snapshot(ctx context.Context) (State, error) {
 
 func (c *client) Activate(ctx context.Context, handle Handle, revision Revision) (State, error) {
 	hi, lo := RevisionWords(revision)
-	_, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
+	_, _, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
 		return c.controller.Activate(requestID, string(handle), hi, lo)
 	})
 	if err != nil {
@@ -375,7 +448,7 @@ func (c *client) Activate(ctx context.Context, handle Handle, revision Revision)
 
 func (c *client) Move(ctx context.Context, handle Handle, revision Revision, at Point) (State, error) {
 	hi, lo := RevisionWords(revision)
-	_, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
+	_, _, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
 		return c.controller.Move(requestID, string(handle), hi, lo, int32(at.X), int32(at.Y))
 	})
 	if err != nil {
@@ -386,7 +459,7 @@ func (c *client) Move(ctx context.Context, handle Handle, revision Revision, at 
 
 func (c *client) CloseWindow(ctx context.Context, handle Handle, revision Revision) (State, error) {
 	hi, lo := RevisionWords(revision)
-	_, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
+	_, _, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
 		return c.controller.Close(requestID, string(handle), hi, lo)
 	})
 	if err != nil {
@@ -397,22 +470,61 @@ func (c *client) CloseWindow(ctx context.Context, handle Handle, revision Revisi
 
 func (c *client) Resize(ctx context.Context, handle Handle, size Size, revision Revision) (ResizeResult, error) {
 	hi, lo := RevisionWords(revision)
-	result, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
+
+	reply, requestID, err := c.send(ctx, waitResize, nil, func(requestID uint32) error {
 		return c.controller.Resize(requestID, string(handle), hi, lo, size.Width, size.Height)
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return ResizeResult{}, c.resizeTimeout(requestID, handle, size)
+		}
 		return ResizeResult{}, err
 	}
-
-	resize := ResizeResult{Handle: handle, Requested: size, Revision: result.revision}
-	if toplevel, ok := c.State().Find(handle); ok {
-		resize.Visible = toplevel.Size
+	if reply.resize == nil {
+		return ResizeResult{}, fmt.Errorf("wlvision control: resize of %s completed without a resize_done event", handle)
 	}
-	return resize, nil
+
+	resized := reply.resize
+	return ResizeResult{
+		Handle:     handle,
+		Requested:  size,
+		Configured: resized.configured,
+		Committed:  resized.committed,
+		Visible:    resized.visible,
+		Revision:   resized.revision,
+	}, nil
+}
+
+// resizeTimeout reports what the module was observed to do before the caller's
+// deadline expired. The details always name the handle and the four sizes as
+// "WxH" strings, so a timeout is diagnosable rather than empty.
+func (c *client) resizeTimeout(requestID uint32, handle Handle, requested Size) *result.Failure {
+	failure := result.NewFailure(result.CodeWaitTimeout, "window.resize",
+		"the application did not commit the configured size in time")
+
+	c.mu.Lock()
+	progress := c.resizeProgress[requestID]
+	delete(c.resizeProgress, requestID)
+	toplevel, haveVisible := c.toplevels[handle]
+	c.mu.Unlock()
+
+	visible := "unknown"
+	if haveVisible {
+		visible = toplevel.Size.String()
+	}
+
+	failure.Details = map[string]string{
+		"handle":     string(handle),
+		"requested":  requested.String(),
+		"configured": observedSize(progress.configured),
+		"committed":  observedSize(progress.committed),
+		"visible":    visible,
+	}
+	return failure
 }
 
 func (c *client) Pointer(ctx context.Context, event PointerEvent) error {
-	_, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
+	_, _, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
 		switch {
 		case event.Motion != nil:
 			return c.controller.PointerMotion(requestID, fixedFromFloat(event.Motion.X), fixedFromFloat(event.Motion.Y))
@@ -428,7 +540,7 @@ func (c *client) Pointer(ctx context.Context, event PointerEvent) error {
 }
 
 func (c *client) Key(ctx context.Context, event KeyEvent) error {
-	_, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
+	_, _, err := c.send(ctx, waitRequest, nil, func(requestID uint32) error {
 		return c.controller.Key(requestID, event.Key, buttonState(event.Pressed))
 	})
 	return err
@@ -501,6 +613,26 @@ func (c *client) Close() error {
 		close(c.frames)
 	})
 	return nil
+}
+
+// sizeFromInt32 converts a wire size to a Size. A negative word can only come
+// from a module that is not the one this facade was generated against, so it
+// is treated as unknown rather than wrapped into a huge size.
+func sizeFromInt32(width, height int32) Size {
+	if width < 0 || height < 0 {
+		return Size{}
+	}
+	return Size{Width: uint32(width), Height: uint32(height)}
+}
+
+// observedSize renders a size a resize event reported, or "unknown" when no
+// event ever reported one. The zero Size is impossible on the wire: every
+// configured size is positive.
+func observedSize(size Size) string {
+	if size == (Size{}) {
+		return "unknown"
+	}
+	return size.String()
 }
 
 // fixedFromFloat converts logical pixels to the 24.8 fixed point the protocol

@@ -80,8 +80,11 @@ struct wlvision_request {
 	struct wl_list link;		/* wlvision_shell::requests */
 	uint32_t id;
 	struct wlvision_toplevel *toplevel;
-	int32_t width;			/* resize: size the application must commit */
-	int32_t height;
+	/* Size the application was actually configured with. The completion rule
+	 * is expressed against this, not against the size the caller typed, so a
+	 * module that clamps a configure keeps completing correctly. */
+	int32_t configured_width;
+	int32_t configured_height;
 };
 
 struct wlvision_toplevel {
@@ -243,30 +246,42 @@ toplevel_state(struct wlvision_toplevel *toplevel)
 	return state;
 }
 
+/*
+ * The geometry the module reports for a toplevel: the same size
+ * emit_toplevel_changed publishes and resize_done carries as visible_*.
+ */
+static void
+toplevel_visible_size(struct wlvision_toplevel *toplevel,
+		      uint32_t *width, uint32_t *height)
+{
+	struct weston_geometry geometry =
+		weston_desktop_surface_get_geometry(toplevel->surface);
+
+	*width = (uint32_t)(geometry.width > 0 ? geometry.width : 0);
+	*height = (uint32_t)(geometry.height > 0 ? geometry.height : 0);
+}
+
 static void
 emit_toplevel_changed(struct wlvision_shell *shell,
 		      struct wlvision_toplevel *toplevel)
 {
 	struct weston_geometry geometry;
-	struct weston_surface *surface;
+	uint32_t width = 0;
+	uint32_t height = 0;
 
 	if (shell->controller_resource == NULL)
 		return;
 
-	surface = weston_desktop_surface_get_surface(toplevel->surface);
 	geometry = weston_desktop_surface_get_geometry(toplevel->surface);
+	toplevel_visible_size(toplevel, &width, &height);
 
 	wlvision_controller_v1_send_toplevel_changed(shell->controller_resource,
 		toplevel->handle,
 		safe_string(weston_desktop_surface_get_title(toplevel->surface)),
 		safe_string(weston_desktop_surface_get_app_id(toplevel->surface)),
-		geometry.x, geometry.y,
-		(uint32_t)(geometry.width > 0 ? geometry.width : 0),
-		(uint32_t)(geometry.height > 0 ? geometry.height : 0),
+		geometry.x, geometry.y, width, height,
 		toplevel_state(toplevel),
 		revision_hi(shell->revision), revision_lo(shell->revision));
-
-	(void)surface;
 }
 
 static void
@@ -278,6 +293,49 @@ answer_done(struct wlvision_shell *shell, uint32_t request_id)
 	wlvision_controller_v1_send_request_done(shell->controller_resource,
 		request_id, revision_hi(shell->revision),
 		revision_lo(shell->revision));
+}
+
+/*
+ * The module's first answer to a resize: the size the application was actually
+ * configured with, emitted immediately after weston_desktop_surface_set_size.
+ */
+static void
+answer_resize_configured(struct wlvision_shell *shell, uint32_t request_id,
+			 int32_t width, int32_t height)
+{
+	if (shell->controller_resource == NULL)
+		return;
+
+	wlvision_controller_v1_send_resize_configured(shell->controller_resource,
+		request_id, width, height);
+}
+
+/*
+ * The terminal answer for a resize request, replacing request_done for that
+ * operation only. committed_* is the content size the application committed,
+ * visible_* the geometry the module reports (the same size
+ * emit_toplevel_changed publishes), and the revision the session revision
+ * after the resize.
+ */
+static void
+answer_resize_done(struct wlvision_shell *shell,
+		   struct wlvision_request *request,
+		   int32_t committed_width, int32_t committed_height)
+{
+	uint32_t visible_width = 0;
+	uint32_t visible_height = 0;
+
+	if (shell->controller_resource == NULL)
+		return;
+
+	toplevel_visible_size(request->toplevel, &visible_width, &visible_height);
+
+	wlvision_controller_v1_send_resize_done(shell->controller_resource,
+		request->id,
+		request->configured_width, request->configured_height,
+		committed_width, committed_height,
+		(int32_t)visible_width, (int32_t)visible_height,
+		revision_hi(shell->revision), revision_lo(shell->revision));
 }
 
 static void
@@ -619,11 +677,19 @@ handle_resize(struct wl_client *client, struct wl_resource *resource,
 	}
 
 	request->toplevel = toplevel;
-	request->width = (int32_t)width;
-	request->height = (int32_t)height;
 
+	/*
+	 * Configure the application, then record the size it was configured
+	 * with before answering: the completion rule compares against this, not
+	 * against the number the caller typed.
+	 */
 	weston_desktop_surface_set_size(toplevel->surface, (int32_t)width,
 					(int32_t)height);
+
+	request->configured_width = (int32_t)width;
+	request->configured_height = (int32_t)height;
+	answer_resize_configured(shell, request_id, request->configured_width,
+				 request->configured_height);
 }
 
 static void
@@ -1022,16 +1088,20 @@ desktop_surface_committed(struct weston_desktop_surface *surface,
 					&buffer_height);
 
 	/* A resize is only complete once the application commits a buffer that
-	 * matches what was asked for: sending a configure proves nothing. */
-	if (buffer_width != request->width || buffer_height != request->height)
+	 * matches the size it was configured with: sending a configure proves
+	 * nothing. The comparison is against the configure the module sent, not
+	 * against the number the caller typed. */
+	if (buffer_width != request->configured_width ||
+	    buffer_height != request->configured_height)
 		return;
 
 	shell_bump_revision(shell);
 	emit_toplevel_changed(shell, toplevel);
-	answer_done(shell, request->id);
+	answer_resize_done(shell, request, buffer_width, buffer_height);
 
-	report("resize-complete handle=%s size=%dx%d revision=%llu",
-	       toplevel->handle, buffer_width, buffer_height,
+	report("resize-complete handle=%s configured=%dx%d committed=%dx%d revision=%llu",
+	       toplevel->handle, request->configured_width,
+	       request->configured_height, buffer_width, buffer_height,
 	       (unsigned long long)shell->revision);
 
 	request_free(request);

@@ -664,6 +664,40 @@ func TestServiceRunReusesAReadySession(t *testing.T) {
 	}
 }
 
+func TestServiceRunRefusesASessionThatIsAlreadyRunning(t *testing.T) {
+	fake := enginetest.New()
+	store := newTestStore(t)
+	service := newTestService(t, fake, store)
+
+	created, err := service.Create(context.Background(), CreateRequest{Session: "demo"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := fake.Start(context.Background(), created.ContainerID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	record, err := store.Load("demo")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	record.State = StateRunning
+	if err := store.Save(record); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	_, err = service.Run(context.Background(), RunRequest{Session: "demo", Argv: []string{"/payload/app"}})
+	failure := failureOfSession(t, err)
+	if failure.Code != result.CodeSessionNotReady {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeSessionNotReady)
+	}
+	if !strings.Contains(failure.Message, "already running") {
+		t.Errorf("message = %q, want it to say the session is already running", failure.Message)
+	}
+	if calls := fake.CountCalls("exec "); calls != 0 {
+		t.Errorf("the engine ran %d commands, want none", calls)
+	}
+}
+
 func TestServiceRunRefusesASessionThatCannotRun(t *testing.T) {
 	fake := enginetest.New()
 	store := newTestStore(t)

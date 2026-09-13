@@ -68,18 +68,29 @@ func (s State) Find(handle Handle) (Toplevel, bool) {
 	return Toplevel{}, false
 }
 
-// ResizeResult separates what was asked for from what was actually visible.
+// ResizeResult is the outcome of a resize request, with each size kept apart
+// because each is observed at a different moment and none implies the others.
 //
-// A requested size is not a result: the application decides whether to honour
-// it. Requested is what the caller asked for and Visible is the geometry the
-// compositor reports afterwards. The module completes the request only after
-// the application commits a matching buffer, so a successful result means the
-// commit happened rather than that a configure was merely sent.
+//   - Requested is what the caller asked for.
+//   - Configured is the size the module actually configured the application
+//     with. The module completes the request against this size rather than
+//     against Requested, so a module that clamps a configure still completes
+//     on the configure the application was sent.
+//   - Committed is the content size of the buffer the application committed.
+//     The request only completes once it matches Configured.
+//   - Visible is the toplevel geometry the module reports after the commit,
+//     the same size emit_toplevel_changed publishes.
+//
+// Revision is the session revision after the resize. A requested size is not a
+// result: sending a configure proves nothing, so a successful result means the
+// application committed the configured size.
 type ResizeResult struct {
-	Handle    Handle
-	Requested Size
-	Visible   Size
-	Revision  Revision
+	Handle     Handle
+	Requested  Size
+	Configured Size
+	Committed  Size
+	Visible    Size
+	Revision   Revision
 }
 
 // Point is an absolute pointer position in logical pixels of the output.

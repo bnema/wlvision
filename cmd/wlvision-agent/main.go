@@ -75,6 +75,24 @@ const readyMarkerName = "agent.ready"
 // capture source's size and format.
 const DefaultSetupTimeout = 30 * time.Second
 
+// DefaultOperationTimeout bounds one request the agent serves. Every request
+// gets a finite budget: without one, a resize the application never commits
+// would hold the resident controller forever and no later operation could be
+// answered.
+const DefaultOperationTimeout = 15 * time.Second
+
+// MinOperationTimeoutMS is the smallest budget a caller may ask for. A shorter
+// one cannot cover a compositor round trip and would only produce noise.
+const MinOperationTimeoutMS = 100
+
+// Codes of the control refusal contract, as the result contract declares them.
+// They are named here so a refused request reaches the caller with the code the
+// approved error model requires instead of only inside the message text.
+const (
+	codeNotAuthorized      = result.CodeNotAuthorized
+	codeCaptureUnavailable = result.CodeCaptureUnavailable
+)
+
 // controlUIDEnv carries the identity the module accepts on the control global.
 // It is the same key the engine adapter sets when it creates the session
 // container; it is repeated here because the adapter and this binary sit on
@@ -212,6 +230,15 @@ func (a *Agent) handle(ctx context.Context, payload []byte) ([]byte, error) {
 			return nil, usageFailure("the arguments of %s are not readable: %v", request.Operation, err)
 		}
 	}
+
+	// Every request gets a finite budget. Without one, a resize the application
+	// never commits would hold this resident controller forever.
+	timeout, err := operationTimeout(params)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	switch operation := strings.ToLower(strings.TrimSpace(request.Operation)); operation {
 	case OpSnapshot:
@@ -417,15 +444,21 @@ func wireState(state control.State) *agentapi.State {
 	return wire
 }
 
-// wireResize renders a completed resize as the wire shape.
+// wireResize renders a completed resize as the wire shape. Every size is
+// copied from the facade; none is derived, so a size the controller did not
+// report stays absent instead of becoming zero.
 func wireResize(resized control.ResizeResult) *agentapi.ResizeResult {
 	return &agentapi.ResizeResult{
-		Handle:          string(resized.Handle),
-		RequestedWidth:  resized.Requested.Width,
-		RequestedHeight: resized.Requested.Height,
-		VisibleWidth:    resized.Visible.Width,
-		VisibleHeight:   resized.Visible.Height,
-		Revision:        uint64(resized.Revision),
+		Handle:           string(resized.Handle),
+		RequestedWidth:   resized.Requested.Width,
+		RequestedHeight:  resized.Requested.Height,
+		ConfiguredWidth:  resized.Configured.Width,
+		ConfiguredHeight: resized.Configured.Height,
+		CommittedWidth:   resized.Committed.Width,
+		CommittedHeight:  resized.Committed.Height,
+		VisibleWidth:     resized.Visible.Width,
+		VisibleHeight:    resized.Visible.Height,
+		Revision:         uint64(resized.Revision),
 	}
 }
 
@@ -436,6 +469,25 @@ func encode(reply Reply) ([]byte, error) {
 		return nil, failure("agent.encode", err)
 	}
 	return payload, nil
+}
+
+// operationTimeout derives one request's budget. DefaultOperationTimeout
+// applies unless the caller asked for less; a budget below the floor is a
+// usage error rather than a request that cannot succeed.
+func operationTimeout(params Params) (time.Duration, error) {
+	if params.TimeoutMS == 0 {
+		return DefaultOperationTimeout, nil
+	}
+	if params.TimeoutMS < MinOperationTimeoutMS {
+		return 0, usageFailure("timeout_ms=%d is below the %dms floor",
+			params.TimeoutMS, MinOperationTimeoutMS)
+	}
+
+	timeout := time.Duration(params.TimeoutMS) * time.Millisecond
+	if timeout > DefaultOperationTimeout {
+		timeout = DefaultOperationTimeout
+	}
+	return timeout, nil
 }
 
 func usageFailure(format string, args ...any) error {
@@ -450,6 +502,10 @@ func failure(operation string, err error) error {
 		return typed
 	}
 
+	if refused, ok := refusalFailure(operation, err); ok {
+		return refused
+	}
+
 	code := result.CodeSessionNotReady
 	switch {
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
@@ -460,6 +516,48 @@ func failure(operation string, err error) error {
 		code = result.CodeSessionNotReady
 	}
 	return result.NewFailure(code, operation, "%v", err)
+}
+
+// refusalFailure maps a control protocol refusal onto the stable result code
+// the approved error model names, so a refused window request reaches the
+// caller with its own code rather than as an opaque session failure. A code
+// with no mapping stays session_not_ready with the control code named in the
+// message.
+func refusalFailure(operation string, err error) (*result.Failure, bool) {
+	var refusal *control.RequestError
+	var sentinel control.ErrorCode
+
+	switch {
+	case errors.As(err, &refusal):
+		if code, ok := refusalCode(refusal.Code); ok {
+			return result.NewFailure(code, operation, "%v", err), true
+		}
+		return result.NewFailure(result.CodeSessionNotReady, operation,
+			"%v (control code %s)", err, refusal.Code), true
+	case errors.As(err, &sentinel):
+		if code, ok := refusalCode(sentinel); ok {
+			return result.NewFailure(code, operation, "%v", err), true
+		}
+		return result.NewFailure(result.CodeSessionNotReady, operation,
+			"%v (control code %s)", err, sentinel), true
+	}
+	return nil, false
+}
+
+// refusalCode maps a control protocol error onto the result contract.
+func refusalCode(code control.ErrorCode) (result.Code, bool) {
+	switch code {
+	case control.CodeWindowNotFound:
+		return result.CodeWindowNotFound, true
+	case control.CodeStaleRevision:
+		return result.CodeStaleRevision, true
+	case control.CodeNotAuthorized:
+		return codeNotAuthorized, true
+	case control.CodeCaptureUnavailable:
+		return codeCaptureUnavailable, true
+	default:
+		return "", false
+	}
 }
 
 // compositorAttacher binds the capture protocol on the controller's connection.

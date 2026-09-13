@@ -44,6 +44,8 @@ var (
 		"request_failed",
 		"frame",
 		"capture_authorized",
+		"resize_configured",
+		"resize_done",
 	}
 )
 
@@ -155,6 +157,23 @@ func requireArgs(t *testing.T, message messageXML, want []string) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("%s arguments = %v, want %v", message.Name, got, want)
+		}
+	}
+}
+
+// requireArgTypes pins the wire types of a message, not only its argument
+// names: a size that crossed as uint where the C module sends int, or a
+// revision word that became an int, would still compile on both sides and
+// silently change the wire format.
+func requireArgTypes(t *testing.T, message messageXML, want []string) {
+	t.Helper()
+
+	if len(message.Args) != len(want) {
+		t.Fatalf("%s has %d arguments, want %d", message.Name, len(message.Args), len(want))
+	}
+	for i := range want {
+		if got := message.Args[i].Type; got != want[i] {
+			t.Errorf("%s.%s type = %q, want %q", message.Name, message.Args[i].Name, got, want[i])
 		}
 	}
 }
@@ -303,6 +322,20 @@ func TestEventPayloadsAreObservable(t *testing.T) {
 
 	authorized := findMessage(t, controller.Events, "capture_authorized")
 	requireArgs(t, authorized, []string{"capture_request_id"})
+
+	configured := findMessage(t, controller.Events, "resize_configured")
+	requireArgs(t, configured, []string{"request_id", "width", "height"})
+	requireArgTypes(t, configured, []string{"uint", "int", "int"})
+
+	resizeDone := findMessage(t, controller.Events, "resize_done")
+	requireArgs(t, resizeDone, []string{
+		"request_id", "configured_width", "configured_height",
+		"committed_width", "committed_height",
+		"visible_width", "visible_height", "revision_hi", "revision_lo",
+	})
+	requireArgTypes(t, resizeDone, []string{
+		"uint", "int", "int", "int", "int", "int", "int", "uint", "uint",
+	})
 }
 
 // Failures are reported as stable codes, so the CLI can map them to its own

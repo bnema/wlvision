@@ -16,6 +16,10 @@ loaded beside the normal desktop shell.
   Window requests carry the revision the caller saw and are refused with
   `stale_revision` when it moved.
 - Enumeration, activation, movement, configure-to-commit resize and close.
+  A resize answers with `resize_configured` carrying the size the application
+  was actually configured with, then completes with `resize_done` only once
+  the application commits a buffer whose content size matches that configure;
+  `resize_done` carries the configured, committed and visible sizes.
 - Pointer and keyboard injection into the compositor's seat.
 - Capture authorization: only the client that was granted capture through the
   control protocol may use Weston's capture protocol; every other attempt is

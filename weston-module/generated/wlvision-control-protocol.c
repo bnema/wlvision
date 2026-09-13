@@ -86,11 +86,13 @@ static const struct wl_message wlvision_controller_v1_events[] = {
 	{ "request_failed", "uus", wlvision_control_types + 0 },
 	{ "frame", "uu", wlvision_control_types + 0 },
 	{ "capture_authorized", "u", wlvision_control_types + 0 },
+	{ "resize_configured", "uii", wlvision_control_types + 0 },
+	{ "resize_done", "uiiiiiiuu", wlvision_control_types + 0 },
 };
 
 WL_PRIVATE const struct wl_interface wlvision_controller_v1_interface = {
 	"wlvision_controller_v1", 1,
 	11, wlvision_controller_v1_requests,
-	7, wlvision_controller_v1_events,
+	9, wlvision_controller_v1_events,
 };
 

@@ -238,8 +238,12 @@ struct wlvision_controller_v1_interface {
 	/**
 	 * request a new window size
 	 *
-	 * Completes only after the application commits a buffer matching
-	 * the configure sequence, or when the caller's timeout expires.
+	 * Answers with resize_configured once the module has configured
+	 * the application, then with resize_done only after the
+	 * application commits a buffer matching that configure, or with
+	 * request_failed when the request is refused. A caller whose
+	 * deadline expires learns what the module last observed from its
+	 * own timeout, not from this interface.
 	 */
 	void (*resize)(struct wl_client *client,
 		       struct wl_resource *resource,
@@ -326,6 +330,8 @@ struct wlvision_controller_v1_interface {
 #define WLVISION_CONTROLLER_V1_REQUEST_FAILED 4
 #define WLVISION_CONTROLLER_V1_FRAME 5
 #define WLVISION_CONTROLLER_V1_CAPTURE_AUTHORIZED 6
+#define WLVISION_CONTROLLER_V1_RESIZE_CONFIGURED 7
+#define WLVISION_CONTROLLER_V1_RESIZE_DONE 8
 
 /**
  * @ingroup iface_wlvision_controller_v1
@@ -355,6 +361,14 @@ struct wlvision_controller_v1_interface {
  * @ingroup iface_wlvision_controller_v1
  */
 #define WLVISION_CONTROLLER_V1_CAPTURE_AUTHORIZED_SINCE_VERSION 1
+/**
+ * @ingroup iface_wlvision_controller_v1
+ */
+#define WLVISION_CONTROLLER_V1_RESIZE_CONFIGURED_SINCE_VERSION 1
+/**
+ * @ingroup iface_wlvision_controller_v1
+ */
+#define WLVISION_CONTROLLER_V1_RESIZE_DONE_SINCE_VERSION 1
 
 /**
  * @ingroup iface_wlvision_controller_v1
@@ -476,6 +490,28 @@ static inline void
 wlvision_controller_v1_send_capture_authorized(struct wl_resource *resource_, uint32_t capture_request_id)
 {
 	wl_resource_post_event(resource_, WLVISION_CONTROLLER_V1_CAPTURE_AUTHORIZED, capture_request_id);
+}
+
+/**
+ * @ingroup iface_wlvision_controller_v1
+ * Sends an resize_configured event to the client owning the resource.
+ * @param resource_ The client's resource
+ */
+static inline void
+wlvision_controller_v1_send_resize_configured(struct wl_resource *resource_, uint32_t request_id, int32_t width, int32_t height)
+{
+	wl_resource_post_event(resource_, WLVISION_CONTROLLER_V1_RESIZE_CONFIGURED, request_id, width, height);
+}
+
+/**
+ * @ingroup iface_wlvision_controller_v1
+ * Sends an resize_done event to the client owning the resource.
+ * @param resource_ The client's resource
+ */
+static inline void
+wlvision_controller_v1_send_resize_done(struct wl_resource *resource_, uint32_t request_id, int32_t configured_width, int32_t configured_height, int32_t committed_width, int32_t committed_height, int32_t visible_width, int32_t visible_height, uint32_t revision_hi, uint32_t revision_lo)
+{
+	wl_resource_post_event(resource_, WLVISION_CONTROLLER_V1_RESIZE_DONE, request_id, configured_width, configured_height, committed_width, committed_height, visible_width, visible_height, revision_hi, revision_lo);
 }
 
 #ifdef  __cplusplus

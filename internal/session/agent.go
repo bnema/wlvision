@@ -64,6 +64,14 @@ func (s *Service) Call(ctx context.Context, id, operation string, params agentap
 		Stderr:      &stderr,
 	})
 	if err != nil {
+		// A deadline the caller set is not an engine problem: the engine is
+		// fine, the session simply did not answer in time. Reporting it as an
+		// unavailable engine would send the caller looking at the wrong thing,
+		// and a caller that interrupts a resize is exactly what a timeout is.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return agentapi.Reply{}, result.NewFailure(result.CodeWaitTimeout, operation,
+				"the session did not answer %s before the deadline: %v", operation, ctxErr)
+		}
 		return agentapi.Reply{}, err
 	}
 	if execution.ExitCode != 0 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -588,5 +589,31 @@ func TestSessionPurgeTakesNoArguments(t *testing.T) {
 	}
 	if envelope := decodeEnvelope(t, stdout); envelope.Ok {
 		t.Error("a purge with an argument was accepted")
+	}
+}
+
+// A service is built for each supported engine without reaching the engine
+// itself, and an unknown engine is refused as a command-line mistake.
+func TestNewServiceSelectsTheEngine(t *testing.T) {
+	for _, kind := range []string{"docker", "podman", ""} {
+		service, err := newDockerService(session.Options{}, globalFlags{stateRoot: t.TempDir(), engine: kind})
+		if err != nil {
+			t.Errorf("--engine %q: %v", kind, err)
+			continue
+		}
+		if service == nil {
+			t.Errorf("--engine %q built no service", kind)
+		}
+	}
+}
+
+func TestNewServiceRefusesAnUnknownEngine(t *testing.T) {
+	_, err := newDockerService(session.Options{}, globalFlags{stateRoot: t.TempDir(), engine: "lxc"})
+	if err == nil {
+		t.Fatal("an unknown engine was accepted")
+	}
+	var failure *result.Failure
+	if !errors.As(err, &failure) || failure.Code != result.CodeUsageError {
+		t.Fatalf("error = %v, want a usage_error failure", err)
 	}
 }

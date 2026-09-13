@@ -86,6 +86,11 @@ type ResizeRequest struct {
 	Target
 	Width  uint32
 	Height uint32
+	// TimeoutMS bounds how long the session may spend waiting for the
+	// application to commit the configured size. Zero leaves the session's own
+	// budget in force; a caller that sets it hears what the session observed at
+	// that deadline instead of giving up blind.
+	TimeoutMS uint32
 }
 
 // ClickRequest clicks inside a window's content.
@@ -203,10 +208,11 @@ func (s *Service) Resize(ctx context.Context, request ResizeRequest) (agentapi.R
 		return agentapi.ResizeResult{}, err
 	}
 	reply, err := s.caller.Call(ctx, agentapi.OpResize, agentapi.Params{
-		Handle:   toplevel.Handle,
-		Revision: state.Revision,
-		Width:    request.Width,
-		Height:   request.Height,
+		Handle:    toplevel.Handle,
+		Revision:  state.Revision,
+		Width:     request.Width,
+		Height:    request.Height,
+		TimeoutMS: request.TimeoutMS,
 	})
 	if err != nil {
 		return agentapi.ResizeResult{}, err

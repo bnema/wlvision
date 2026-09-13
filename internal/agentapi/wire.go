@@ -73,6 +73,11 @@ type Params struct {
 	Axis     uint32  `json:"axis,omitempty"`
 	Value    float64 `json:"value,omitempty"`
 	Key      uint32  `json:"key,omitempty"`
+	// TimeoutMS shortens the agent's per-request budget. Zero uses the
+	// agent's DefaultOperationTimeout; a non-zero value is capped at that
+	// default and must be at least 100ms. The outer CLI sets it for a resize
+	// so the session answers with what it observed before the caller gives up.
+	TimeoutMS uint32 `json:"timeout_ms,omitempty"`
 	// Path is where a capture is written, relative to the session's export
 	// directory. An absolute path or a traversing one is refused.
 	Path string `json:"path,omitempty"`
@@ -108,14 +113,23 @@ type Toplevel struct {
 	Revision uint64 `json:"revision"`
 }
 
-// ResizeResult reports a completed configure-to-commit resize.
+// ResizeResult reports a completed configure-to-commit resize. Each size is
+// what its own source observed: Requested is what the caller asked for,
+// Configured is the size the module actually configured the application with,
+// Committed is the content size the application committed, and Visible is the
+// toplevel geometry the module reports. A size the controller did not supply
+// is omitted rather than reported as zero.
 type ResizeResult struct {
-	Handle          string `json:"handle"`
-	RequestedWidth  uint32 `json:"requested_width"`
-	RequestedHeight uint32 `json:"requested_height"`
-	VisibleWidth    uint32 `json:"visible_width"`
-	VisibleHeight   uint32 `json:"visible_height"`
-	Revision        uint64 `json:"revision"`
+	Handle           string `json:"handle"`
+	RequestedWidth   uint32 `json:"requested_width,omitempty"`
+	RequestedHeight  uint32 `json:"requested_height,omitempty"`
+	ConfiguredWidth  uint32 `json:"configured_width,omitempty"`
+	ConfiguredHeight uint32 `json:"configured_height,omitempty"`
+	CommittedWidth   uint32 `json:"committed_width,omitempty"`
+	CommittedHeight  uint32 `json:"committed_height,omitempty"`
+	VisibleWidth     uint32 `json:"visible_width,omitempty"`
+	VisibleHeight    uint32 `json:"visible_height,omitempty"`
+	Revision         uint64 `json:"revision,omitempty"`
 }
 
 // FrameResult describes one stored capture.

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,9 +29,12 @@ type fakeController struct {
 	frames       chan control.Frame
 	authorizeID  uint64
 	err          error
-	calls        []string
-	pointers     []control.PointerEvent
-	keys         []control.KeyEvent
+	// resizeHook, when set, replaces the canned resize. Tests use it to hold
+	// the call until the agent's budget expires.
+	resizeHook func(ctx context.Context, handle control.Handle, size control.Size, revision control.Revision) (control.ResizeResult, error)
+	calls      []string
+	pointers   []control.PointerEvent
+	keys       []control.KeyEvent
 }
 
 func newFakeController() *fakeController {
@@ -41,10 +45,19 @@ func newFakeController() *fakeController {
 				{Handle: "app-1", Title: "probe", AppID: "probe", Size: control.Size{Width: 320, Height: 200}, Revision: 7},
 			},
 		},
-		revision:     7,
-		resizeResult: control.ResizeResult{Handle: "app-1", Requested: control.Size{Width: 400, Height: 300}, Visible: control.Size{Width: 400, Height: 300}, Revision: 9},
-		frames:       make(chan control.Frame, 4),
-		authorizeID:  11,
+		revision: 7,
+		// Each size comes from its own source and is distinct from the others, so
+		// a wired result that collapses them is caught here.
+		resizeResult: control.ResizeResult{
+			Handle:     "app-1",
+			Requested:  control.Size{Width: 1024, Height: 768},
+			Configured: control.Size{Width: 640, Height: 480},
+			Committed:  control.Size{Width: 800, Height: 600},
+			Visible:    control.Size{Width: 400, Height: 300},
+			Revision:   9,
+		},
+		frames:      make(chan control.Frame, 4),
+		authorizeID: 11,
 	}
 }
 
@@ -65,8 +78,11 @@ func (f *fakeController) Move(_ context.Context, handle control.Handle, revision
 	return f.state, f.err
 }
 
-func (f *fakeController) Resize(_ context.Context, handle control.Handle, size control.Size, revision control.Revision) (control.ResizeResult, error) {
+func (f *fakeController) Resize(ctx context.Context, handle control.Handle, size control.Size, revision control.Revision) (control.ResizeResult, error) {
 	f.record("resize " + string(handle))
+	if f.resizeHook != nil {
+		return f.resizeHook(ctx, handle, size, revision)
+	}
 	return f.resizeResult, f.err
 }
 
@@ -265,8 +281,8 @@ func TestAgentForwardsWindowOperationsWithTheirRevision(t *testing.T) {
 			}
 		}},
 		{"resize", Params{Handle: "app-1", Revision: 7, Width: 400, Height: 300}, "resize app-1", func(t *testing.T, reply Reply) {
-			if reply.Resize == nil || reply.Resize.VisibleWidth != 400 {
-				t.Errorf("resize reply = %+v, want the committed size", reply.Resize)
+			if reply.Resize == nil || reply.Resize.VisibleWidth != 400 || reply.Resize.VisibleHeight != 300 {
+				t.Errorf("resize reply = %+v, want the visible 400x300", reply.Resize)
 			}
 		}},
 		{"close_window", Params{Handle: "app-1", Revision: 7}, "close app-1", func(t *testing.T, reply Reply) {
@@ -455,6 +471,211 @@ func TestAgentKeepsTheCodeTheControlLayerAssigned(t *testing.T) {
 	_, err := request(t, agent, OpActivate, Params{Handle: "app-1", Revision: 3})
 	if code := failureCode(t, err); code != result.CodeStaleRevision {
 		t.Errorf("code = %s, want the code the control layer assigned", code)
+	}
+}
+
+// The wire result must carry each of the four sizes from its own source: a
+// collapsed field would still satisfy a test that only read one of them.
+func TestAgentResizeCarriesTheFourSizes(t *testing.T) {
+	agent, _, _, _ := testAgent(t)
+
+	payload, err := request(t, agent, OpResize, Params{Handle: "app-1", Revision: 7, Width: 1024, Height: 768})
+	if err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	resized := replyOf(t, payload).Resize
+	if resized == nil {
+		t.Fatal("resize returned no result")
+	}
+
+	for _, size := range []struct {
+		name      string
+		width     uint32
+		height    uint32
+		gotWidth  uint32
+		gotHeight uint32
+	}{{
+		"requested", 1024, 768, resized.RequestedWidth, resized.RequestedHeight,
+	}, {
+		"configured", 640, 480, resized.ConfiguredWidth, resized.ConfiguredHeight,
+	}, {
+		"committed", 800, 600, resized.CommittedWidth, resized.CommittedHeight,
+	}, {
+		"visible", 400, 300, resized.VisibleWidth, resized.VisibleHeight,
+	}} {
+		if size.gotWidth != size.width || size.gotHeight != size.height {
+			t.Errorf("%s = %dx%d, want %dx%d", size.name, size.gotWidth, size.gotHeight, size.width, size.height)
+		}
+	}
+	if resized.Revision != 9 {
+		t.Errorf("revision = %d, want 9", resized.Revision)
+	}
+}
+
+// resizeTimeoutFailure is the failure the control facade returns when its
+// deadline expires: CodeWaitTimeout with the sizes it observed.
+func resizeTimeoutFailure(handle string, requested control.Size) *result.Failure {
+	failure := result.NewFailure(result.CodeWaitTimeout, "window.resize",
+		"the application did not commit the configured size in time")
+	failure.Details = map[string]string{
+		"handle":     handle,
+		"requested":  requested.String(),
+		"configured": "640x480",
+		"committed":  "unknown",
+		"visible":    "320x200",
+	}
+	return failure
+}
+
+// A request the application never completes must time out, report what was
+// observed, and leave the agent able to serve the next request.
+func TestAgentResizeDeadlineIsBoundedAndReported(t *testing.T) {
+	agent, controller, _, _ := testAgent(t)
+	controller.resizeHook = func(ctx context.Context, handle control.Handle, size control.Size, revision control.Revision) (control.ResizeResult, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			return control.ResizeResult{}, errors.New("the agent passed a context with no deadline")
+		}
+		<-ctx.Done()
+		return control.ResizeResult{}, resizeTimeoutFailure(string(handle), size)
+	}
+
+	_, err := request(t, agent, OpResize, Params{
+		Handle: "app-1", Revision: 7, Width: 1024, Height: 768, TimeoutMS: MinOperationTimeoutMS,
+	})
+
+	var failure *result.Failure
+	if !errors.As(err, &failure) {
+		t.Fatalf("error = %v (%T), want *result.Failure", err, err)
+	}
+	if failure.Code != result.CodeWaitTimeout {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeWaitTimeout)
+	}
+	for key, want := range map[string]string{
+		"handle": "app-1", "requested": "1024x768", "configured": "640x480",
+		"committed": "unknown", "visible": "320x200",
+	} {
+		if got := failure.Details[key]; got != want {
+			t.Errorf("details[%q] = %q, want %q", key, got, want)
+		}
+	}
+
+	// Nothing is left pending: the same agent answers the next request.
+	next, err := request(t, agent, OpSnapshot, nil)
+	if err != nil {
+		t.Fatalf("the request after a resize deadline: %v", err)
+	}
+	if reply := replyOf(t, next); reply.State == nil {
+		t.Error("the agent did not answer after a resize deadline")
+	}
+}
+
+// Every request gets the default budget unless the caller asks for less, and a
+// budget below the floor is refused before it reaches the controller.
+func TestAgentOperationBudgetDefaultsShortensAndFloors(t *testing.T) {
+	agent, controller, _, _ := testAgent(t)
+
+	var remaining time.Duration
+	controller.resizeHook = func(ctx context.Context, handle control.Handle, size control.Size, revision control.Revision) (control.ResizeResult, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return control.ResizeResult{}, errors.New("the agent passed a context with no deadline")
+		}
+		remaining = time.Until(deadline)
+		return controller.resizeResult, nil
+	}
+
+	if _, err := request(t, agent, OpResize, Params{Handle: "app-1", Revision: 7, Width: 1024, Height: 768}); err != nil {
+		t.Fatalf("resize with the default budget: %v", err)
+	}
+	if remaining <= 0 || remaining > DefaultOperationTimeout {
+		t.Errorf("default budget = %s, want at most %s", remaining, DefaultOperationTimeout)
+	}
+	if remaining < DefaultOperationTimeout-time.Second {
+		t.Errorf("default budget = %s, want close to %s", remaining, DefaultOperationTimeout)
+	}
+
+	if _, err := request(t, agent, OpResize, Params{Handle: "app-1", Revision: 7, Width: 1024, Height: 768, TimeoutMS: 200}); err != nil {
+		t.Fatalf("resize with a shortened budget: %v", err)
+	}
+	if remaining <= 0 || remaining > 200*time.Millisecond {
+		t.Errorf("shortened budget = %s, want at most 200ms", remaining)
+	}
+
+	calls := len(controller.calls)
+	_, err := request(t, agent, OpResize, Params{
+		Handle: "app-1", Revision: 7, Width: 1024, Height: 768, TimeoutMS: MinOperationTimeoutMS - 1,
+	})
+	if code := failureCode(t, err); code != result.CodeUsageError {
+		t.Errorf("code = %s, want %s", code, result.CodeUsageError)
+	}
+	if len(controller.calls) != calls {
+		t.Error("a request below the timeout floor reached the controller")
+	}
+}
+
+// A refused window request must reach the caller with the stable code the
+// error model names, not as an opaque session failure.
+func TestAgentMapsControlRefusalsToResultCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		code control.ErrorCode
+		want result.Code
+	}{
+		{"window not found", control.CodeWindowNotFound, result.CodeWindowNotFound},
+		{"stale revision", control.CodeStaleRevision, result.CodeStaleRevision},
+		{"not authorized", control.CodeNotAuthorized, codeNotAuthorized},
+		{"capture unavailable", control.CodeCaptureUnavailable, codeCaptureUnavailable},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			agent, controller, _, _ := testAgent(t)
+			controller.err = &control.RequestError{Code: test.code, Message: "refused"}
+
+			_, err := request(t, agent, OpActivate, Params{Handle: "app-1", Revision: 7})
+			if got := failureCode(t, err); got != test.want {
+				t.Errorf("code = %s, want %s", got, test.want)
+			}
+		})
+	}
+
+	t.Run("unmapped", func(t *testing.T) {
+		agent, controller, _, _ := testAgent(t)
+		controller.err = &control.RequestError{Code: control.CodeInvalidArgument, Message: "width must be positive"}
+
+		_, err := request(t, agent, OpActivate, Params{Handle: "app-1", Revision: 7})
+		var failure *result.Failure
+		if !errors.As(err, &failure) {
+			t.Fatalf("error = %v (%T), want *result.Failure", err, err)
+		}
+		if failure.Code != result.CodeSessionNotReady {
+			t.Errorf("code = %s, want %s", failure.Code, result.CodeSessionNotReady)
+		}
+		if !strings.Contains(failure.Message, "invalid_argument") {
+			t.Errorf("message = %q, want it to name the control code", failure.Message)
+		}
+	})
+}
+
+// A failure the controller already shaped must pass through verbatim, details
+// included.
+func TestAgentPassesAFailureThroughVerbatim(t *testing.T) {
+	agent, controller, _, _ := testAgent(t)
+	original := result.NewFailure(result.CodeWaitTimeout, "window.resize",
+		"the application did not commit the configured size in time")
+	original.Details = map[string]string{"handle": "app-1", "configured": "640x480"}
+	controller.err = original
+
+	_, err := request(t, agent, OpActivate, Params{Handle: "app-1", Revision: 7})
+	var failure *result.Failure
+	if !errors.As(err, &failure) {
+		t.Fatalf("error = %v (%T), want *result.Failure", err, err)
+	}
+	if failure != original {
+		t.Errorf("the agent replaced the controller's failure: %p, want %p", failure, original)
+	}
+	if failure.Details["configured"] != "640x480" {
+		t.Errorf("details = %v, want the controller's details preserved", failure.Details)
 	}
 }
 

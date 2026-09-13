@@ -24,8 +24,11 @@ from the module's peer credential check, not from filesystem permissions.
   and geometry;
 - activate succeeds with the current revision, is refused as `stale_revision`
   with an outdated one, and as `window_not_found` for an unknown handle;
-- resize completes only after the application commits a matching buffer, and
-  the visible size is the requested one;
+- resize completes only after the application commits a buffer matching the
+  configure it was sent, and the result reports the requested, configured,
+  committed and visible sizes separately. The fixture always commits the size
+  it was configured with, so this gate cannot produce a resize deadline; that
+  path is covered deterministically by the control client's tests;
 - pointer motion, a button press and a key press are injected;
 - capture is refused before the module authorizes the connection, and completes
   afterwards with real pixels and a PNG;

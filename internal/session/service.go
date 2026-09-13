@@ -387,6 +387,14 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (Record, error) {
 			"session %q is %s and cannot run an application", request.Session, record.State)
 	}
 
+	// A session runs one application at a time: its state records that an
+	// application is alive, and a second run would have no way to tell the two
+	// exits apart.
+	if record.State == StateRunning {
+		return record, result.NewFailure(result.CodeSessionNotReady, "session.run",
+			"session %q is already running an application; wait for it to exit or close the session", request.Session)
+	}
+
 	if err := record.Transition(StateRunning, s.now()); err != nil {
 		return record, err
 	}

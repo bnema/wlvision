@@ -3,12 +3,14 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bnema/wlturbo/wl"
 	"github.com/bnema/wlvision/internal/control/generated"
 	"github.com/bnema/wlvision/internal/controltest"
+	"github.com/bnema/wlvision/internal/result"
 )
 
 // Controller request opcodes, in declaration order.
@@ -35,6 +37,8 @@ const (
 	evRequestFailed
 	evFrame
 	evCaptureAuthorized
+	evResizeConfigured
+	evResizeDone
 )
 
 func newServer(t *testing.T) *controltest.Server {
@@ -265,7 +269,7 @@ func TestStaleRevisionIsReportedAsItsCode(t *testing.T) {
 	}
 }
 
-func TestResizeReportsRequestedAndVisibleSizes(t *testing.T) {
+func TestResizeReportsAllFourSizes(t *testing.T) {
 	srv := newServer(t)
 	client := newClient(t, srv)
 	controller := controllerObject(t, srv)
@@ -278,7 +282,7 @@ func TestResizeReportsRequestedAndVisibleSizes(t *testing.T) {
 	}
 
 	results, cancel := runAsync(func(ctx context.Context) asyncResult {
-		resize, err := client.Resize(ctx, "app-1", Size{Width: 800, Height: 600}, 1)
+		resize, err := client.Resize(ctx, "app-1", Size{Width: 1024, Height: 768}, 1)
 		return asyncResult{resize: resize, err: err}
 	})
 	defer cancel()
@@ -289,35 +293,258 @@ func TestResizeReportsRequestedAndVisibleSizes(t *testing.T) {
 	if handle != "app-1" {
 		t.Fatalf("handle = %q", handle)
 	}
-	if got := request.Uint32(12 + consumed); got != 800 {
-		t.Errorf("width = %d, want 800", got)
+	if got := request.Uint32(12 + consumed); got != 1024 {
+		t.Errorf("width = %d, want 1024", got)
 	}
-	if got := request.Uint32(16 + consumed); got != 600 {
-		t.Errorf("height = %d, want 600", got)
+	if got := request.Uint32(16 + consumed); got != 768 {
+		t.Errorf("height = %d, want 768", got)
 	}
 
-	// The application committed the new size, and the compositor reports it.
+	// The module configured the application with one size and answered first
+	// with resize_configured; the resize only completes on the resize_done that
+	// follows the commit. Each field below carries its own source, which is why
+	// the values differ: requested 1024x768, configured 640x480, committed and
+	// visible 800x600.
+	if err := srv.SendEvent(controller, evResizeConfigured, requestID, int32(640), int32(480)); err != nil {
+		t.Fatalf("SendEvent(resize_configured): %v", err)
+	}
+	if err := srv.SendEvent(controller, evResizeDone,
+		requestID, int32(640), int32(480), int32(800), int32(600),
+		int32(800), int32(600), uint32(0), uint32(2)); err != nil {
+		t.Fatalf("SendEvent(resize_done): %v", err)
+	}
+
+	got := await(t, results)
+	if got.err != nil {
+		t.Fatalf("Resize: %v", got.err)
+	}
+	if got.resize.Requested != (Size{Width: 1024, Height: 768}) {
+		t.Errorf("requested = %s, want 1024x768", got.resize.Requested)
+	}
+	if got.resize.Configured != (Size{Width: 640, Height: 480}) {
+		t.Errorf("configured = %s, want 640x480 (the configure, not the request)", got.resize.Configured)
+	}
+	if got.resize.Committed != (Size{Width: 800, Height: 600}) {
+		t.Errorf("committed = %s, want 800x600", got.resize.Committed)
+	}
+	if got.resize.Visible != (Size{Width: 800, Height: 600}) {
+		t.Errorf("visible = %s, want 800x600", got.resize.Visible)
+	}
+	if got.resize.Revision != 2 {
+		t.Errorf("revision = %d, want 2", got.resize.Revision)
+	}
+}
+
+// A resize the module refuses still travels as request_failed with its code.
+func TestResizeRefusalKeepsTheProtocolCode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		handle Handle
+		code   ErrorCode
+		want   error
+	}{
+		{"stale revision", "app-1", CodeStaleRevision, ErrStaleRevision},
+		{"unknown handle", "app-missing", CodeWindowNotFound, ErrWindowNotFound},
+		{"invalid argument", "app-1", CodeInvalidArgument, ErrInvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newServer(t)
+			client := newClient(t, srv)
+
+			results, cancel := runAsync(func(ctx context.Context) asyncResult {
+				resize, err := client.Resize(ctx, tc.handle, Size{Width: 400, Height: 300}, 9)
+				return asyncResult{resize: resize, err: err}
+			})
+			defer cancel()
+
+			request := srv.WaitForRequest(t, generated.WlvisionControllerInterface, opResize)
+			if err := srv.SendEvent(controllerObject(t, srv), evRequestFailed,
+				request.Uint32(0), uint32(tc.code), "refused"); err != nil {
+				t.Fatalf("SendEvent(request_failed): %v", err)
+			}
+
+			got := await(t, results)
+			if !errors.Is(got.err, tc.want) {
+				t.Fatalf("error = %v, want it to unwrap to %v", got.err, tc.want)
+			}
+			if got.resize != (ResizeResult{}) {
+				t.Errorf("failed resize returned %+v, want the zero result", got.resize)
+			}
+		})
+	}
+}
+
+// A deadline reports what was observed: the configure that was sent, that no
+// commit matched it, and the geometry the facade last saw.
+func TestResizeTimeoutReportsWhatWasObserved(t *testing.T) {
+	srv := newServer(t)
+	client := newClient(t, srv)
+	controller := controllerObject(t, srv)
+
 	if err := srv.SendEvent(controller, evToplevelChanged,
 		"app-1", "Example", "org.example.App",
-		int32(0), int32(0), uint32(800), uint32(600), uint32(0), uint32(0), uint32(2)); err != nil {
+		int32(0), int32(0), uint32(100), uint32(100), uint32(0), uint32(0), uint32(1)); err != nil {
 		t.Fatalf("SendEvent(toplevel_changed): %v", err)
 	}
-	if err := srv.SendEvent(controller, evRequestDone, requestID, uint32(0), uint32(2)); err != nil {
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	results := make(chan asyncResult, 1)
+	go func() {
+		resize, err := client.Resize(ctx, "app-1", Size{Width: 1024, Height: 768}, client.Revision())
+		results <- asyncResult{resize: resize, err: err}
+	}()
+
+	request := srv.WaitForRequest(t, generated.WlvisionControllerInterface, opResize)
+	// The module configured the application, but no commit ever followed.
+	if err := srv.SendEvent(controller, evResizeConfigured, request.Uint32(0), int32(640), int32(480)); err != nil {
+		t.Fatalf("SendEvent(resize_configured): %v", err)
+	}
+
+	got := await(t, results)
+
+	var failure *result.Failure
+	if !errors.As(got.err, &failure) {
+		t.Fatalf("error = %v (%T), want *result.Failure", got.err, got.err)
+	}
+	if failure.Code != result.CodeWaitTimeout {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeWaitTimeout)
+	}
+	if !strings.Contains(failure.Message, "did not commit the configured size") {
+		t.Errorf("message = %q, want it to state the application did not commit in time", failure.Message)
+	}
+
+	want := map[string]string{
+		"handle":     "app-1",
+		"requested":  "1024x768",
+		"configured": "640x480",
+		"committed":  "unknown",
+		"visible":    "100x100",
+	}
+	for key, value := range want {
+		if detail := failure.Details[key]; detail != value {
+			t.Errorf("details[%q] = %q, want %q", key, detail, value)
+		}
+	}
+}
+
+// The module keeps one outstanding resize per window: a second request
+// replaces the first, whose caller learns about it by timing out with no
+// progress of its own.
+func TestResizeSupersededBySecondRequestTimesOut(t *testing.T) {
+	srv := newServer(t)
+	client := newClient(t, srv)
+	controller := controllerObject(t, srv)
+
+	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancelFirst()
+	first := make(chan asyncResult, 1)
+	go func() {
+		resize, err := client.Resize(firstCtx, "app-1", Size{Width: 300, Height: 200}, 1)
+		first <- asyncResult{resize: resize, err: err}
+	}()
+
+	firstRequest := srv.WaitForRequest(t, generated.WlvisionControllerInterface, opResize)
+	firstID := firstRequest.Uint32(0)
+
+	// The first request was configured before it was replaced, so its own
+	// progress must be what its deadline reports.
+	if err := srv.SendEvent(controller, evResizeConfigured, firstID, int32(300), int32(200)); err != nil {
+		t.Fatalf("SendEvent(resize_configured): %v", err)
+	}
+
+	second, cancelSecond := runAsync(func(ctx context.Context) asyncResult {
+		resize, err := client.Resize(ctx, "app-1", Size{Width: 400, Height: 300}, 1)
+		return asyncResult{resize: resize, err: err}
+	})
+	defer cancelSecond()
+
+	var secondRequest controltest.Request
+	deadline := time.Now().Add(5 * time.Second)
+	for secondRequest.Body == nil {
+		for _, request := range srv.Requests() {
+			if request.Object == controller && request.Opcode == opResize && request.Uint32(0) != firstID {
+				secondRequest = request
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second resize was never sent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := srv.SendEvent(controller, evResizeConfigured, secondRequest.Uint32(0), int32(400), int32(300)); err != nil {
+		t.Fatalf("SendEvent(resize_configured): %v", err)
+	}
+	if err := srv.SendEvent(controller, evResizeDone,
+		secondRequest.Uint32(0), int32(400), int32(300), int32(400), int32(300),
+		int32(400), int32(300), uint32(0), uint32(2)); err != nil {
+		t.Fatalf("SendEvent(resize_done): %v", err)
+	}
+
+	secondResult := await(t, second)
+	if secondResult.err != nil {
+		t.Fatalf("second Resize: %v", secondResult.err)
+	}
+	if secondResult.resize.Requested != (Size{Width: 400, Height: 300}) {
+		t.Errorf("second requested = %s, want 400x300", secondResult.resize.Requested)
+	}
+
+	firstResult := await(t, first)
+	var failure *result.Failure
+	if !errors.As(firstResult.err, &failure) {
+		t.Fatalf("superseded resize error = %v, want *result.Failure", firstResult.err)
+	}
+	if failure.Code != result.CodeWaitTimeout {
+		t.Errorf("superseded code = %s, want %s", failure.Code, result.CodeWaitTimeout)
+	}
+	// The first request reported its own configure before it was replaced, so
+	// its deadline names that configure, never the successor's 400x300.
+	if detail := failure.Details["configured"]; detail != "300x200" {
+		t.Errorf("superseded configured = %q, want its own 300x200", detail)
+	}
+	if detail := failure.Details["requested"]; detail != "300x200" {
+		t.Errorf("superseded requested = %q, want 300x200", detail)
+	}
+	if detail := failure.Details["handle"]; detail != "app-1" {
+		t.Errorf("superseded handle = %q, want app-1", detail)
+	}
+}
+
+// A resize that times out is a failure of that request, not of the
+// connection: the facade must keep serving afterwards.
+func TestFacadeServesAfterAResizeDeadline(t *testing.T) {
+	srv := newServer(t)
+	client := newClient(t, srv)
+	controller := controllerObject(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := client.Resize(ctx, "app-1", Size{Width: 300, Height: 200}, 1); err == nil {
+		t.Fatal("Resize succeeded, want a deadline failure")
+	}
+
+	results, cancelSnapshot := runAsync(func(ctx context.Context) asyncResult {
+		state, err := client.Snapshot(ctx)
+		return asyncResult{state: state, err: err}
+	})
+	defer cancelSnapshot()
+
+	request := srv.WaitForRequest(t, generated.WlvisionControllerInterface, opSnapshot)
+	if err := srv.SendEvent(controller, evSnapshot, uint32(0), uint32(3)); err != nil {
+		t.Fatalf("SendEvent(snapshot): %v", err)
+	}
+	if err := srv.SendEvent(controller, evRequestDone, request.Uint32(0), uint32(0), uint32(3)); err != nil {
 		t.Fatalf("SendEvent(request_done): %v", err)
 	}
 
-	result := await(t, results)
-	if result.err != nil {
-		t.Fatalf("Resize: %v", result.err)
+	got := await(t, results)
+	if got.err != nil {
+		t.Fatalf("Snapshot after a resize deadline: %v", got.err)
 	}
-	if result.resize.Requested != (Size{Width: 800, Height: 600}) {
-		t.Errorf("requested = %s", result.resize.Requested)
-	}
-	if result.resize.Visible != (Size{Width: 800, Height: 600}) {
-		t.Errorf("visible = %s, want the committed size", result.resize.Visible)
-	}
-	if result.resize.Revision != 2 {
-		t.Errorf("revision = %d, want 2", result.resize.Revision)
+	if got.state.Revision != 3 {
+		t.Errorf("revision = %d, want 3", got.state.Revision)
 	}
 }
 
