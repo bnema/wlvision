@@ -532,14 +532,21 @@ func (s *Service) Inject(ctx context.Context, request InjectRequest) (Payload, e
 		argv = append(argv, "--mode", fmt.Sprintf("0%o", request.Mode))
 	}
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	if err := s.engine.Stream(ctx, engine.StreamSpec{
 		ContainerID: record.ContainerID,
 		User:        s.controlUID,
 		Argv:        argv,
 		Source:      request.Source,
 		Stdout:      &stdout,
+		Stderr:      &stderr,
 	}); err != nil {
+		// The receiver reports a rejected payload as a failure document on its
+		// standard error, so a refusal is reported as itself rather than as a
+		// broken stream.
+		if failure := decodeFailure(stderr.Bytes()); failure != nil {
+			return Payload{}, failure
+		}
 		return Payload{}, err
 	}
 
@@ -720,6 +727,20 @@ func asFailure(operation string, err error) *result.Failure {
 		return failure
 	}
 	return result.NewFailure(result.CodeSessionNotReady, operation, "%v", err)
+}
+
+// decodeFailure reads the failure document an in-container command reported on
+// its standard error. It returns nil when the output is not one.
+func decodeFailure(payload []byte) *result.Failure {
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return nil
+	}
+
+	var envelope result.Envelope[json.RawMessage]
+	if err := json.Unmarshal(bytes.TrimSpace(payload), &envelope); err != nil {
+		return nil
+	}
+	return envelope.Error
 }
 
 // mergeDegradations unions the gaps an engine reports with the limits a session

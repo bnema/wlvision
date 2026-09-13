@@ -593,3 +593,44 @@ func readRecordFile(t *testing.T, store *Store, id string) []byte {
 	}
 	return payload
 }
+
+// A payload the receiver refuses must reach the caller as a payload failure,
+// not as a broken engine stream: the receiver reports it on its standard error.
+func TestServiceInjectReportsTheReceiversRefusal(t *testing.T) {
+	fake := enginetest.New()
+	store := newTestStore(t)
+	service := newTestService(t, fake, store)
+
+	created, err := service.Create(context.Background(), CreateRequest{Session: "demo"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	record, err := store.Load("demo")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	record.State = StateReady
+	record.ContainerID = created.ContainerID
+	if err := store.Save(record); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	refusal := result.Fail[any]("payload.receive", "demo",
+		result.NewFailure(result.CodePayloadRejected, "payload.receive", "the bundle contains a parent traversal"))
+	fake.StreamFunc = func(spec engine.StreamSpec) error {
+		if err := result.RenderJSON(spec.Stderr, refusal); err != nil {
+			return err
+		}
+		return &result.Failure{Code: result.CodeEngineUnavailable, Message: "the exec returned a non-zero status"}
+	}
+
+	_, err = service.Inject(context.Background(), InjectRequest{
+		Session: "demo", Kind: "tar", Name: "bundle", Source: strings.NewReader("payload"),
+	})
+	if err == nil {
+		t.Fatal("a refused payload was accepted")
+	}
+	if failure := failureOfSession(t, err); failure.Code != result.CodePayloadRejected {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodePayloadRejected)
+	}
+}
