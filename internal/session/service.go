@@ -691,11 +691,16 @@ func (s *Service) observe(ctx context.Context, record Record) (Observed, error) 
 // sessionMounts is the fixed mount set of a session: a writable runtime
 // directory, a scratch directory, and the application's home. Nothing of the
 // host is mounted, and everything writable is bounded and memory-backed.
+//
+// The engine creates these mounts owned by root, so each one has to be writable
+// by the session's own identities; the sticky bit keeps one identity from
+// removing another's entries, and the control directory inside the runtime
+// directory is what actually separates them.
 func sessionMounts() []engine.Tmpfs {
 	return []engine.Tmpfs{
-		{Path: RuntimeDir, SizeBytes: 64 << 20, Mode: 0o711, Exec: true},
+		{Path: RuntimeDir, SizeBytes: 64 << 20, Mode: 0o1777, Exec: true},
 		{Path: "/tmp", SizeBytes: 32 << 20, Mode: 0o1777},
-		{Path: "/home/agent", SizeBytes: 32 << 20, Mode: 0o700},
+		{Path: "/home/agent", SizeBytes: 32 << 20, Mode: 0o1777},
 	}
 }
 
