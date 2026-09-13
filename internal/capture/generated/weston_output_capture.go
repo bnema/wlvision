@@ -9,25 +9,25 @@ import (
 )
 
 // ERROR_INVALID_SOURCE is the error invalid_source value.
-const ERROR_INVALID_SOURCE int32 = 0
+const ERROR_INVALID_SOURCE = 0
 
 // SOURCE_WRITEBACK is the source writeback value.
-const SOURCE_WRITEBACK int32 = 0
+const SOURCE_WRITEBACK = 0
 
 // SOURCE_FRAMEBUFFER is the source framebuffer value.
-const SOURCE_FRAMEBUFFER int32 = 1
+const SOURCE_FRAMEBUFFER = 1
 
 // SOURCE_FULL_FRAMEBUFFER is the source full_framebuffer value.
-const SOURCE_FULL_FRAMEBUFFER int32 = 2
+const SOURCE_FULL_FRAMEBUFFER = 2
 
 // SOURCE_BLENDING is the source blending value.
-const SOURCE_BLENDING int32 = 3
+const SOURCE_BLENDING = 3
 
 // ERROR_BAD_BUFFER is the error bad_buffer value.
-const ERROR_BAD_BUFFER int32 = 0
+const ERROR_BAD_BUFFER = 0
 
 // ERROR_SEQUENCE is the error sequence value.
-const ERROR_SEQUENCE int32 = 1
+const ERROR_SEQUENCE = 1
 
 // WestonCaptureInterface is the protocol interface name.
 const WestonCaptureInterface = "weston_capture_v1"

@@ -9,19 +9,19 @@ import (
 )
 
 // ERROR_STALE_REVISION is the error stale_revision value.
-const ERROR_STALE_REVISION int32 = 0
+const ERROR_STALE_REVISION = 0
 
 // ERROR_WINDOW_NOT_FOUND is the error window_not_found value.
-const ERROR_WINDOW_NOT_FOUND int32 = 1
+const ERROR_WINDOW_NOT_FOUND = 1
 
 // ERROR_NOT_AUTHORIZED is the error not_authorized value.
-const ERROR_NOT_AUTHORIZED int32 = 2
+const ERROR_NOT_AUTHORIZED = 2
 
 // ERROR_CAPTURE_UNAVAILABLE is the error capture_unavailable value.
-const ERROR_CAPTURE_UNAVAILABLE int32 = 3
+const ERROR_CAPTURE_UNAVAILABLE = 3
 
 // ERROR_INVALID_ARGUMENT is the error invalid_argument value.
-const ERROR_INVALID_ARGUMENT int32 = 4
+const ERROR_INVALID_ARGUMENT = 4
 
 // WlvisionControlInterface is the protocol interface name.
 const WlvisionControlInterface = "wlvision_control_v1"
