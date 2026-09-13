@@ -592,9 +592,9 @@ handle_resize(struct wl_client *client, struct wl_resource *resource,
 		return;
 	}
 
-	if (width == 0 || height == 0) {
+	if (width == 0 || height == 0 || width > INT32_MAX || height > INT32_MAX) {
 		answer_failed(shell, request_id, WLVISION_ERROR_INVALID_ARGUMENT,
-			      "width and height must be positive");
+			      "width and height must be positive and fit in 32 bits");
 		return;
 	}
 
@@ -1329,7 +1329,11 @@ read_control_uid(struct wlvision_shell *shell)
 
 	errno = 0;
 	uid = strtol(value, &end, 10);
-	if (errno != 0 || end == value || *end != '\0' || uid < 0) {
+	/* Reject anything that does not fit a uid_t: a value such as 2^32 would
+	 * otherwise truncate to 0 and turn the deny-by-default gate into "root may
+	 * control". */
+	if (errno != 0 || end == value || *end != '\0' || uid < 0 ||
+	    (unsigned long)uid > (unsigned long)UINT32_MAX) {
 		report("error reason=invalid-control-uid value=%s", value);
 		return;
 	}

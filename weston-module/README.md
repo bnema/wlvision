@@ -58,7 +58,25 @@ part of that tree.
 ## State
 
 The module compiles cleanly with `-Wall -Wextra` against the pinned revision and
-exports both entry points. Its runtime behaviour — a real controller binding the
-protocol, driving windows and observing frames — is verified next; until that
-exists, treat this as an implementation that has not yet been exercised against
-a running Weston.
+exports both entry points. Its runtime behaviour is verified by
+`../test/module-runtime/`: a real controller binds the protocol, enumerates and
+activates windows, resizes one, injects pointer and keyboard events, captures
+the framebuffer after authorization, and is refused the protocol when it runs
+under a different UID.
+
+## Known follow-ups
+
+Two review findings are recorded here rather than fixed, because both touch
+object lifetime in ways that need their own verification against a running
+compositor:
+
+- `shell_destroyed` frees the window list and the `weston_desktop` before any
+  surface teardown. The pinned Weston never tears those surfaces down after
+  `compositor->destroy_signal`, so no path to the resulting use-after-free was
+  found, but the ordering is not safe by construction. Upstream `kiosk-shell`
+  destroys its surfaces first.
+- The module installs no metadata listener, so a title or application-id change
+  that is not followed by another observable change is not reported until the
+  next event. Weston 16 exposes
+  `weston_desktop_surface_add_metadata_listener`, which is the intended fix; it
+  needs a listener whose removal on surface destruction is verified first.
