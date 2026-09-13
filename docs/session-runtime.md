@@ -44,6 +44,48 @@ has to be able to create its own directories inside them.
 `/tmp` and `/home/agent` are the same kind of mount. The image itself is
 read-only, the network is `none`, and no host path is mounted into a session.
 
+## Keyboard
+
+The control protocol injects evdev keycodes, so what a key means is decided by
+the keymap the compositor hands to its clients. The supervisor therefore writes
+`control/weston.ini` before starting Weston and passes it with `--config`:
+
+```ini
+[keyboard]
+keymap_rules=evdev
+keymap_model=pc105
+keymap_layout=us
+keymap_variant=
+keymap_options=
+```
+
+The same values are exported as `XKB_DEFAULT_*` for the compositor, so the
+layout never depends on the host's xkb defaults. V1 guarantees that layout; any
+other layout is an image capability, and `wlvision doctor` reports the one a
+session runs with.
+
+Keycodes cross two conventions that must not be mixed up:
+
+| Where | Unit |
+| --- | --- |
+| control protocol (`weston_keyboard_send_key`, `wlvision key --keycode`) | evdev keycode |
+| the keymap a client compiles, and the `wl_keyboard.key` it receives | evdev + 8 (XKB keycode) |
+
+The CLI resolves text and key names with `internal/input/keymap/us.json`, a
+table generated from the same RMLVO by `keymap/keymap-dump.c` inside the pinned
+image (`scripts/generate-keymap.sh`). It lists evdev keycodes, so a stroke goes
+straight from the table to the injection path without conversion.
+
+## Host artifacts
+
+The only host writes wlvision performs for a caller are the artifacts it asks
+for: screenshots and capture bursts. They land under
+`$XDG_STATE_HOME/wlvision/export/<session>/`, the same root the session records
+live in. A name is relative to that directory — no absolute path, no parent
+reference, no symbolic link, and nothing but a regular file is replaced — and
+writes are staged and renamed. `internal/export` owns those rules, and the CLI
+is its only caller.
+
 ## Readiness
 
 Readiness is a report, not a timer. The controller writes
@@ -57,12 +99,21 @@ optimistic observation.
 ## Verification
 
 `test/integration/run.sh` builds the session image, cross-compiles the
-binaries, and runs the lifecycle gate against a real rootless engine. The gate
-creates a session with the CLI and checks, in order: readiness, that the
-application identity cannot read the control directory nor reach the
-controller, that the image is read-only, that the session has no network, that
-no host path is visible inside it, that an injected payload is executable by
-the application identity, that the CLI can run an application, that an
-application's window is observable and the session capturable, that the logs
-carry the session's own progress, that the session survives its application,
-and that closing removes the container.
+binaries, and runs two gates against a real rootless engine.
+
+The lifecycle gate creates a session with the CLI and checks, in order:
+readiness, that the application identity cannot read the control directory nor
+reach the controller, that the image is read-only, that the session has no
+network, that no host path is visible inside it, that an injected payload is
+executable by the application identity, that the CLI can run an application,
+that an application's window is observable and the session capturable, that the
+logs carry the session's own progress, that the session survives its
+application, and that closing removes the container.
+
+The interaction and vision gate starts the fixture client in a session and
+checks that a resize completes only on a matching commit and times out
+otherwise, that keys and pointer input reach the application (decoded through
+the keymap the compositor sends), that a two-second burst of an animation sees
+distinct frames with ordered sequences, that a quiet screen is proven stable by
+active probes, and that a resize between two captures is visible in their
+digests and revisions.

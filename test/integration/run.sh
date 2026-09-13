@@ -14,6 +14,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root_dir="$(cd -- "${script_dir}/../.." && pwd)"
 image="wlvision-session:local"
+# test_count lets a release gate repeat the scenarios without editing the script.
+test_count="${WLVISION_TEST_COUNT:-1}"
 
 if ! command -v docker >/dev/null 2>&1; then
 	echo "error: docker is required for the session lifecycle gate" >&2
@@ -40,13 +42,22 @@ cp -r "${root_dir}/weston-module" "${build_dir}/weston-module"
 echo "==> building the session image"
 docker build -q -t "${image}" -f "${root_dir}/images/arch/Containerfile" "${build_dir}" >/dev/null
 
-echo "==> running the lifecycle test"
+echo "==> running the lifecycle gate"
 (
 	cd -- "${root_dir}"
 	WLVISION_TEST_IMAGE="${image}" \
 	WLVISION_TEST_CLI="${build_dir}/bin/wlvision" \
 	WLVISION_TEST_STATE="${state_dir}" \
-		go test ./test/integration -run TestLifecycle -count=1 -v
+		go test ./test/integration -run TestLifecycle -count="${test_count}" -v
 )
 
-echo "==> session lifecycle gate passed"
+echo "==> running the interaction and vision gate"
+(
+	cd -- "${root_dir}"
+	WLVISION_TEST_IMAGE="${image}" \
+	WLVISION_TEST_CLI="${build_dir}/bin/wlvision" \
+	WLVISION_TEST_STATE="${state_dir}" \
+		go test ./test/integration -run 'TestResizeCommit|TestVisionInput|TestAnimationBurst|TestQuietStability' -count="${test_count}" -v
+)
+
+echo "==> session gates passed"
