@@ -634,3 +634,54 @@ func TestServiceInjectReportsTheReceiversRefusal(t *testing.T) {
 		t.Errorf("code = %s, want %s", failure.Code, result.CodePayloadRejected)
 	}
 }
+
+// An agent sets a session up once and then runs applications in it, so a run
+// must reuse the session it finds instead of trying to create it again.
+func TestServiceRunReusesAReadySession(t *testing.T) {
+	fake := enginetest.New()
+	store := newTestStore(t)
+	service := newTestService(t, fake, store)
+
+	if _, err := service.Create(context.Background(), CreateRequest{Session: "demo"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := service.Start(context.Background(), "demo"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	record, err := service.Run(context.Background(), RunRequest{Session: "demo", Argv: []string{"/payload/app"}})
+	if err != nil {
+		t.Fatalf("Run in an existing session: %v", err)
+	}
+	if record.State != StateReady {
+		t.Errorf("state = %s, want ready", record.State)
+	}
+	if record.Process == nil {
+		t.Error("the run recorded no exit")
+	}
+	if created := fake.CountCalls("create "); created != 1 {
+		t.Errorf("the engine created %d containers, want the session to be reused", created)
+	}
+}
+
+func TestServiceRunRefusesASessionThatCannotRun(t *testing.T) {
+	fake := enginetest.New()
+	store := newTestStore(t)
+	service := newTestService(t, fake, store)
+
+	if _, err := service.Create(context.Background(), CreateRequest{Session: "demo"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fake.Forget("container-1")
+	if _, _, err := service.Inspect(context.Background(), "demo"); err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+
+	_, err := service.Run(context.Background(), RunRequest{Session: "demo", Argv: []string{"/payload/app"}})
+	if failure := failureOfSession(t, err); failure.Code != result.CodeSessionNotReady {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeSessionNotReady)
+	}
+	if fake.CountCalls("exec ") != 0 {
+		t.Error("an application was started in a session that cannot run one")
+	}
+}

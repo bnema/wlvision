@@ -344,6 +344,11 @@ type RunRequest struct {
 
 // Run creates, starts, and runs an application, then records how it exited.
 //
+// A session that already exists and is usable is reused: an agent sets a
+// session up once and then runs applications in it, so creating one here would
+// only make the second command fail. A session that exists in any other state
+// is reported as unusable rather than replaced.
+//
 // The session outlives the application: the compositor, the final framebuffer,
 // and the logs stay available until an explicit close, unless the caller asked
 // for an ephemeral session.
@@ -351,16 +356,24 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (Record, error) {
 	if len(request.Argv) == 0 {
 		return Record{}, result.NewFailure(result.CodeUsageError, "session.run", "an application command is required")
 	}
-	if _, err := s.Create(ctx, CreateRequest{Session: request.Session, Limits: request.Limits, Retention: request.Retention}); err != nil {
-		return Record{}, err
-	}
 
-	record, err := s.Start(ctx, request.Session)
-	if err != nil {
-		if request.Ephemeral {
-			_, _ = s.Close(ctx, request.Session, s.stopTimeout)
+	record, err := s.store.Load(request.Session)
+	switch {
+	case err != nil:
+		if _, err := s.Create(ctx, CreateRequest{Session: request.Session, Limits: request.Limits, Retention: request.Retention}); err != nil {
+			return Record{}, err
 		}
-		return record, err
+		record, err = s.Start(ctx, request.Session)
+		if err != nil {
+			if request.Ephemeral {
+				_, _ = s.Close(ctx, request.Session, s.stopTimeout)
+			}
+			return record, err
+		}
+
+	case !record.State.Interactive():
+		return record, result.NewFailure(result.CodeSessionNotReady, "session.run",
+			"session %q is %s and cannot run an application", request.Session, record.State)
 	}
 
 	if err := record.Transition(StateRunning, s.now()); err != nil {
