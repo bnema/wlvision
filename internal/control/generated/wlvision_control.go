@@ -5,6 +5,8 @@
 package generated
 
 import (
+	"sync"
+
 	"github.com/bnema/wlturbo/wl"
 )
 
@@ -74,6 +76,9 @@ const WlvisionControllerInterface = "wlvision_controller_v1"
 // WlvisionController is the generated binding for wlvision_controller_v1 version 1.
 type WlvisionController struct {
 	wl.BaseProxy
+	// handlersMu guards the handler slices: a client may register or replace
+	// handlers while another goroutine dispatches events.
+	handlersMu          sync.Mutex
 	onSnapshot          []func(revisionHi uint32, revisionLo uint32)
 	onToplevelChanged   []func(handle string, title string, appId string, x int32, y int32, width uint32, height uint32, state uint32, revisionHi uint32, revisionLo uint32)
 	onToplevelRemoved   []func(handle string)
@@ -181,38 +186,136 @@ func (o *WlvisionController) Destroy() error {
 }
 
 // OnSnapshot registers a handler for the snapshot event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnSnapshot(handler func(revisionHi uint32, revisionLo uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onSnapshot = append(o.onSnapshot, handler)
 }
 
+// handlersForSnapshot returns the handlers registered for snapshot, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForSnapshot() []func(revisionHi uint32, revisionLo uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(revisionHi uint32, revisionLo uint32){}, o.onSnapshot...)
+}
+
 // OnToplevelChanged registers a handler for the toplevel_changed event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnToplevelChanged(handler func(handle string, title string, appId string, x int32, y int32, width uint32, height uint32, state uint32, revisionHi uint32, revisionLo uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onToplevelChanged = append(o.onToplevelChanged, handler)
 }
 
+// handlersForToplevelChanged returns the handlers registered for toplevel_changed, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForToplevelChanged() []func(handle string, title string, appId string, x int32, y int32, width uint32, height uint32, state uint32, revisionHi uint32, revisionLo uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(handle string, title string, appId string, x int32, y int32, width uint32, height uint32, state uint32, revisionHi uint32, revisionLo uint32){}, o.onToplevelChanged...)
+}
+
 // OnToplevelRemoved registers a handler for the toplevel_removed event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnToplevelRemoved(handler func(handle string)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onToplevelRemoved = append(o.onToplevelRemoved, handler)
 }
 
+// handlersForToplevelRemoved returns the handlers registered for toplevel_removed, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForToplevelRemoved() []func(handle string) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(handle string){}, o.onToplevelRemoved...)
+}
+
 // OnRequestDone registers a handler for the request_done event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnRequestDone(handler func(requestId uint32, revisionHi uint32, revisionLo uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onRequestDone = append(o.onRequestDone, handler)
 }
 
+// handlersForRequestDone returns the handlers registered for request_done, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForRequestDone() []func(requestId uint32, revisionHi uint32, revisionLo uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(requestId uint32, revisionHi uint32, revisionLo uint32){}, o.onRequestDone...)
+}
+
 // OnRequestFailed registers a handler for the request_failed event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnRequestFailed(handler func(requestId uint32, code uint32, message string)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onRequestFailed = append(o.onRequestFailed, handler)
 }
 
+// handlersForRequestFailed returns the handlers registered for request_failed, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForRequestFailed() []func(requestId uint32, code uint32, message string) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(requestId uint32, code uint32, message string){}, o.onRequestFailed...)
+}
+
 // OnFrame registers a handler for the frame event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnFrame(handler func(captureRequestId uint32, frameSequence uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onFrame = append(o.onFrame, handler)
 }
 
+// handlersForFrame returns the handlers registered for frame, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForFrame() []func(captureRequestId uint32, frameSequence uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(captureRequestId uint32, frameSequence uint32){}, o.onFrame...)
+}
+
 // OnCaptureAuthorized registers a handler for the capture_authorized event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WlvisionController) OnCaptureAuthorized(handler func(captureRequestId uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onCaptureAuthorized = append(o.onCaptureAuthorized, handler)
+}
+
+// handlersForCaptureAuthorized returns the handlers registered for capture_authorized, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WlvisionController) handlersForCaptureAuthorized() []func(captureRequestId uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(captureRequestId uint32){}, o.onCaptureAuthorized...)
 }
 
 // Dispatch decodes one event on wlvision_controller_v1 and calls the registered handlers.
@@ -221,7 +324,7 @@ func (o *WlvisionController) Dispatch(event *wl.Event) {
 	case 0: // snapshot
 		revisionHi := event.Uint32()
 		revisionLo := event.Uint32()
-		for _, handler := range o.onSnapshot {
+		for _, handler := range o.handlersForSnapshot() {
 			handler(revisionHi, revisionLo)
 		}
 	case 1: // toplevel_changed
@@ -235,37 +338,37 @@ func (o *WlvisionController) Dispatch(event *wl.Event) {
 		state := event.Uint32()
 		revisionHi := event.Uint32()
 		revisionLo := event.Uint32()
-		for _, handler := range o.onToplevelChanged {
+		for _, handler := range o.handlersForToplevelChanged() {
 			handler(handle, title, appId, x, y, width, height, state, revisionHi, revisionLo)
 		}
 	case 2: // toplevel_removed
 		handle := event.String()
-		for _, handler := range o.onToplevelRemoved {
+		for _, handler := range o.handlersForToplevelRemoved() {
 			handler(handle)
 		}
 	case 3: // request_done
 		requestId := event.Uint32()
 		revisionHi := event.Uint32()
 		revisionLo := event.Uint32()
-		for _, handler := range o.onRequestDone {
+		for _, handler := range o.handlersForRequestDone() {
 			handler(requestId, revisionHi, revisionLo)
 		}
 	case 4: // request_failed
 		requestId := event.Uint32()
 		code := event.Uint32()
 		message := event.String()
-		for _, handler := range o.onRequestFailed {
+		for _, handler := range o.handlersForRequestFailed() {
 			handler(requestId, code, message)
 		}
 	case 5: // frame
 		captureRequestId := event.Uint32()
 		frameSequence := event.Uint32()
-		for _, handler := range o.onFrame {
+		for _, handler := range o.handlersForFrame() {
 			handler(captureRequestId, frameSequence)
 		}
 	case 6: // capture_authorized
 		captureRequestId := event.Uint32()
-		for _, handler := range o.onCaptureAuthorized {
+		for _, handler := range o.handlersForCaptureAuthorized() {
 			handler(captureRequestId)
 		}
 	default:

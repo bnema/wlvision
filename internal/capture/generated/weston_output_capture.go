@@ -5,6 +5,8 @@
 package generated
 
 import (
+	"sync"
+
 	"github.com/bnema/wlturbo/wl"
 )
 
@@ -84,6 +86,9 @@ const WestonCaptureSourceInterface = "weston_capture_source_v1"
 // WestonCaptureSource is the generated binding for weston_capture_source_v1 version 2.
 type WestonCaptureSource struct {
 	wl.BaseProxy
+	// handlersMu guards the handler slices: a client may register or replace
+	// handlers while another goroutine dispatches events.
+	handlersMu    sync.Mutex
 	onFormat      []func(drmFormat uint32)
 	onSize        []func(width int32, height int32)
 	onComplete    []func()
@@ -122,33 +127,117 @@ func (o *WestonCaptureSource) Capture(buffer *wl.BaseProxy) error {
 }
 
 // OnFormat registers a handler for the format event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WestonCaptureSource) OnFormat(handler func(drmFormat uint32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onFormat = append(o.onFormat, handler)
 }
 
+// handlersForFormat returns the handlers registered for format, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WestonCaptureSource) handlersForFormat() []func(drmFormat uint32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(drmFormat uint32){}, o.onFormat...)
+}
+
 // OnSize registers a handler for the size event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WestonCaptureSource) OnSize(handler func(width int32, height int32)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onSize = append(o.onSize, handler)
 }
 
+// handlersForSize returns the handlers registered for size, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WestonCaptureSource) handlersForSize() []func(width int32, height int32) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(width int32, height int32){}, o.onSize...)
+}
+
 // OnComplete registers a handler for the complete event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WestonCaptureSource) OnComplete(handler func()) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onComplete = append(o.onComplete, handler)
 }
 
+// handlersForComplete returns the handlers registered for complete, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WestonCaptureSource) handlersForComplete() []func() {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(){}, o.onComplete...)
+}
+
 // OnRetry registers a handler for the retry event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WestonCaptureSource) OnRetry(handler func()) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onRetry = append(o.onRetry, handler)
 }
 
+// handlersForRetry returns the handlers registered for retry, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WestonCaptureSource) handlersForRetry() []func() {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(){}, o.onRetry...)
+}
+
 // OnFailed registers a handler for the failed event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WestonCaptureSource) OnFailed(handler func(msg string)) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onFailed = append(o.onFailed, handler)
 }
 
+// handlersForFailed returns the handlers registered for failed, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WestonCaptureSource) handlersForFailed() []func(msg string) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(msg string){}, o.onFailed...)
+}
+
 // OnFormatsDone registers a handler for the formats_done event.
+//
+// Handlers are appended, so a second call adds another handler rather than
+// replacing the first. Registration is safe while another goroutine dispatches.
 func (o *WestonCaptureSource) OnFormatsDone(handler func()) {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
 	o.onFormatsDone = append(o.onFormatsDone, handler)
+}
+
+// handlersForFormatsDone returns the handlers registered for formats_done, taken
+// under the lock so a handler may register another handler while events are
+// being dispatched.
+func (o *WestonCaptureSource) handlersForFormatsDone() []func() {
+	o.handlersMu.Lock()
+	defer o.handlersMu.Unlock()
+	return append([]func(){}, o.onFormatsDone...)
 }
 
 // Dispatch decodes one event on weston_capture_source_v1 and calls the registered handlers.
@@ -156,30 +245,30 @@ func (o *WestonCaptureSource) Dispatch(event *wl.Event) {
 	switch event.Opcode {
 	case 0: // format
 		drmFormat := event.Uint32()
-		for _, handler := range o.onFormat {
+		for _, handler := range o.handlersForFormat() {
 			handler(drmFormat)
 		}
 	case 1: // size
 		width := event.Int32()
 		height := event.Int32()
-		for _, handler := range o.onSize {
+		for _, handler := range o.handlersForSize() {
 			handler(width, height)
 		}
 	case 2: // complete
-		for _, handler := range o.onComplete {
+		for _, handler := range o.handlersForComplete() {
 			handler()
 		}
 	case 3: // retry
-		for _, handler := range o.onRetry {
+		for _, handler := range o.handlersForRetry() {
 			handler()
 		}
 	case 4: // failed
 		msg := event.String()
-		for _, handler := range o.onFailed {
+		for _, handler := range o.handlersForFailed() {
 			handler(msg)
 		}
 	case 5: // formats_done
-		for _, handler := range o.onFormatsDone {
+		for _, handler := range o.handlersForFormatsDone() {
 			handler()
 		}
 	default:
