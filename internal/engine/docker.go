@@ -449,15 +449,20 @@ func parseEngineTime(value string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, value)
 }
 
-// option renders one tmpfs mount. Device nodes and setuid are always denied;
-// execution is denied unless the mount explicitly allows it.
+// option renders one tmpfs mount. Device nodes and setuid are always denied.
+//
+// Execution is denied unless the mount explicitly allows it, because the
+// engine's own tmpfs default is noexec: a payload installed under a mount that
+// did not ask for exec could never run, whatever its file mode says.
 func (m Tmpfs) option() string {
 	options := []string{
 		"rw",
 		"size=" + strconv.FormatInt(m.SizeBytes, 10),
 		"mode=0" + strconv.FormatUint(uint64(m.Mode), 8),
 	}
-	if !m.Exec {
+	if m.Exec {
+		options = append(options, "exec")
+	} else {
 		options = append(options, "noexec")
 	}
 	options = append(options, "nosuid", "nodev")

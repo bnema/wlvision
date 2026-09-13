@@ -281,7 +281,7 @@ func TestDockerCreateAppliesTheIsolationContract(t *testing.T) {
 		Tmpfs: []Tmpfs{
 			{Path: "/run", SizeBytes: 64 << 20, Mode: 0o755, Exec: true},
 			{Path: "/tmp", SizeBytes: 32 << 20, Mode: 0o1777},
-			{Path: "/home/agent", SizeBytes: 32 << 20, Mode: 0o700},
+			{Path: "/home/agent", SizeBytes: 32 << 20, Mode: 0o1777},
 		},
 		Limits: Limits{MemoryBytes: 1 << 30, Pids: 128, FileSizeBytes: 64 << 20, OpenFiles: 512},
 	}
@@ -308,9 +308,9 @@ func TestDockerCreateAppliesTheIsolationContract(t *testing.T) {
 		"--pids-limit 128",
 		"--ulimit fsize=67108864",
 		"--ulimit nofile=512",
-		"--tmpfs /run:rw,size=67108864,mode=0755,nosuid,nodev",
+		"--tmpfs /run:rw,size=67108864,mode=0755,exec,nosuid,nodev",
 		"--tmpfs /tmp:rw,size=33554432,mode=01777,noexec,nosuid,nodev",
-		"--tmpfs /home/agent:rw,size=33554432,mode=0700,noexec,nosuid,nodev",
+		"--tmpfs /home/agent:rw,size=33554432,mode=01777,noexec,nosuid,nodev",
 		"-e WLVISION_SESSION=demo",
 		"-e WLVISION_CONTROL_UID=1000",
 		"-e WLVISION_APPLICATION_UID=1001",
