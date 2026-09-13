@@ -8,6 +8,9 @@
 # against the directory of each go.mod file, not against the caller's cwd.
 #
 # This never touches HOME or the global Go configuration.
+#
+# `go mod tidy` is deliberately not run: wlvision has no package importing the
+# dependencies yet, so tidy would delete the pinned requirements.
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
