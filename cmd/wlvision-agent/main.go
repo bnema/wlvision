@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bnema/wlvision/internal/agentapi"
 	"github.com/bnema/wlvision/internal/capture"
 	"github.com/bnema/wlvision/internal/control"
 	"github.com/bnema/wlvision/internal/result"
@@ -37,24 +38,33 @@ import (
 	"github.com/bnema/wlturbo/wl"
 )
 
-// Operations the agent serves. They mirror the control facade one for one.
+// The wire contract lives in internal/agentapi because the short-lived caller
+// shares it; these aliases keep the operation code reading as it should.
 const (
-	OpSnapshot         = "snapshot"
-	OpActivate         = "activate"
-	OpMove             = "move"
-	OpResize           = "resize"
-	OpCloseWindow      = "close_window"
-	OpPointer          = "pointer"
-	OpKey              = "key"
-	OpAuthorizeCapture = "authorize_capture"
-	OpCapture          = "capture"
+	OpSnapshot         = agentapi.OpSnapshot
+	OpActivate         = agentapi.OpActivate
+	OpMove             = agentapi.OpMove
+	OpResize           = agentapi.OpResize
+	OpCloseWindow      = agentapi.OpCloseWindow
+	OpPointer          = agentapi.OpPointer
+	OpKey              = agentapi.OpKey
+	OpAuthorizeCapture = agentapi.OpAuthorizeCapture
+	OpCapture          = agentapi.OpCapture
 )
 
 // Pointer kinds the pointer operation accepts.
 const (
-	PointerMotion = "motion"
-	PointerButton = "button"
-	PointerAxis   = "axis"
+	PointerMotion = agentapi.PointerMotion
+	PointerButton = agentapi.PointerButton
+	PointerAxis   = agentapi.PointerAxis
+)
+
+// The request and reply shapes are the shared ones.
+type (
+	Request     = agentapi.Request
+	Params      = agentapi.Params
+	Reply       = agentapi.Reply
+	FrameResult = agentapi.FrameResult
 )
 
 // readyMarkerName is the marker the supervisor waits for. It is written only
@@ -70,54 +80,6 @@ const DefaultSetupTimeout = 30 * time.Second
 // container; it is repeated here because the adapter and this binary sit on
 // opposite sides of the container boundary and must not import each other.
 const controlUIDEnv = "WLVISION_CONTROL_UID"
-
-// Request is one operation and its arguments.
-type Request struct {
-	Operation string          `json:"operation"`
-	Params    json.RawMessage `json:"params,omitempty"`
-}
-
-// Params are the arguments of an operation in one flat shape.
-//
-// A single shape keeps the wire readable and versionable: an agent carries its
-// own types, and the CLI is where these fields become typed flags.
-type Params struct {
-	Handle   string  `json:"handle,omitempty"`
-	Revision uint64  `json:"revision,omitempty"`
-	X        float64 `json:"x,omitempty"`
-	Y        float64 `json:"y,omitempty"`
-	Width    uint32  `json:"width,omitempty"`
-	Height   uint32  `json:"height,omitempty"`
-	Kind     string  `json:"kind,omitempty"`
-	Button   uint32  `json:"button,omitempty"`
-	State    string  `json:"state,omitempty"`
-	Axis     uint32  `json:"axis,omitempty"`
-	Value    float64 `json:"value,omitempty"`
-	Key      uint32  `json:"key,omitempty"`
-	// Path is where a capture is written, relative to the session's export
-	// directory. An absolute path or a traversing one is refused.
-	Path string `json:"path,omitempty"`
-}
-
-// Reply is the result of one operation. Exactly one field is set.
-type Reply struct {
-	Revision         uint64                `json:"revision,omitempty"`
-	State            *control.State        `json:"state,omitempty"`
-	Resize           *control.ResizeResult `json:"resize,omitempty"`
-	Frame            *FrameResult          `json:"frame,omitempty"`
-	CaptureRequestID uint64                `json:"capture_request_id,omitempty"`
-}
-
-// FrameResult describes one stored capture.
-type FrameResult struct {
-	Path             string `json:"path"`
-	Digest           string `json:"digest"`
-	Width            int    `json:"width"`
-	Height           int    `json:"height"`
-	Format           string `json:"format"`
-	Sequence         uint64 `json:"frame_sequence"`
-	CaptureRequestID uint64 `json:"capture_request_id,omitempty"`
-}
 
 // Controller is the privileged control surface the agent serves. control.Client
 // satisfies it; the interface is narrow so the operations can be exercised
@@ -257,14 +219,14 @@ func (a *Agent) handle(ctx context.Context, payload []byte) ([]byte, error) {
 		if err != nil {
 			return nil, failure("window.snapshot", err)
 		}
-		return encode(Reply{Revision: uint64(state.Revision), State: &state})
+		return encode(Reply{Revision: uint64(state.Revision), State: wireState(state)})
 
 	case OpActivate:
 		state, err := a.controller.Activate(ctx, control.Handle(params.Handle), control.Revision(params.Revision))
 		if err != nil {
 			return nil, failure("window.activate", err)
 		}
-		return encode(Reply{Revision: uint64(state.Revision), State: &state})
+		return encode(Reply{Revision: uint64(state.Revision), State: wireState(state)})
 
 	case OpMove:
 		state, err := a.controller.Move(ctx, control.Handle(params.Handle), control.Revision(params.Revision),
@@ -272,7 +234,7 @@ func (a *Agent) handle(ctx context.Context, payload []byte) ([]byte, error) {
 		if err != nil {
 			return nil, failure("window.move", err)
 		}
-		return encode(Reply{Revision: uint64(state.Revision), State: &state})
+		return encode(Reply{Revision: uint64(state.Revision), State: wireState(state)})
 
 	case OpResize:
 		resized, err := a.controller.Resize(ctx, control.Handle(params.Handle),
@@ -280,14 +242,14 @@ func (a *Agent) handle(ctx context.Context, payload []byte) ([]byte, error) {
 		if err != nil {
 			return nil, failure("window.resize", err)
 		}
-		return encode(Reply{Revision: uint64(resized.Revision), Resize: &resized})
+		return encode(Reply{Revision: uint64(resized.Revision), Resize: wireResize(resized)})
 
 	case OpCloseWindow:
 		state, err := a.controller.CloseWindow(ctx, control.Handle(params.Handle), control.Revision(params.Revision))
 		if err != nil {
 			return nil, failure("window.close", err)
 		}
-		return encode(Reply{Revision: uint64(state.Revision), State: &state})
+		return encode(Reply{Revision: uint64(state.Revision), State: wireState(state)})
 
 	case OpPointer:
 		event, err := pointerEvent(params)
@@ -434,6 +396,37 @@ func writeFile(path string, payload []byte) error {
 		return err
 	}
 	return os.WriteFile(path, payload, 0o600)
+}
+
+// wireState renders the facade's window state as the wire shape.
+func wireState(state control.State) *agentapi.State {
+	wire := &agentapi.State{Revision: uint64(state.Revision)}
+	for _, toplevel := range state.Toplevels {
+		wire.Toplevels = append(wire.Toplevels, agentapi.Toplevel{
+			Handle:   string(toplevel.Handle),
+			Title:    toplevel.Title,
+			AppID:    toplevel.AppID,
+			X:        toplevel.X,
+			Y:        toplevel.Y,
+			Width:    toplevel.Size.Width,
+			Height:   toplevel.Size.Height,
+			State:    toplevel.State,
+			Revision: uint64(toplevel.Revision),
+		})
+	}
+	return wire
+}
+
+// wireResize renders a completed resize as the wire shape.
+func wireResize(resized control.ResizeResult) *agentapi.ResizeResult {
+	return &agentapi.ResizeResult{
+		Handle:          string(resized.Handle),
+		RequestedWidth:  resized.Requested.Width,
+		RequestedHeight: resized.Requested.Height,
+		VisibleWidth:    resized.Visible.Width,
+		VisibleHeight:   resized.Visible.Height,
+		Revision:        uint64(resized.Revision),
+	}
 }
 
 // encode renders one reply.

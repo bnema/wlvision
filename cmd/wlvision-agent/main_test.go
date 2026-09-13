@@ -265,7 +265,7 @@ func TestAgentForwardsWindowOperationsWithTheirRevision(t *testing.T) {
 			}
 		}},
 		{"resize", Params{Handle: "app-1", Revision: 7, Width: 400, Height: 300}, "resize app-1", func(t *testing.T, reply Reply) {
-			if reply.Resize == nil || reply.Resize.Visible.Width != 400 {
+			if reply.Resize == nil || reply.Resize.VisibleWidth != 400 {
 				t.Errorf("resize reply = %+v, want the committed size", reply.Resize)
 			}
 		}},
