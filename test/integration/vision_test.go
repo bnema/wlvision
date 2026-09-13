@@ -126,6 +126,36 @@ func contains(haystack, needle string) bool {
 	return bytes.Contains([]byte(haystack), []byte(needle))
 }
 
+// failureEnvelope is the part of a failure document these gates assert on.
+type failureEnvelope struct {
+	Ok    bool `json:"ok"`
+	Error struct {
+		Code    string            `json:"code"`
+		Message string            `json:"message"`
+		Details map[string]string `json:"details"`
+	} `json:"error"`
+}
+
+// parseFailure reads one failure document from the CLI's stdout.
+func parseFailure(t *testing.T, stdout string) failureEnvelope {
+	t.Helper()
+
+	var envelope failureEnvelope
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("the failure document is unreadable: %v (%q)", err, stdout)
+	}
+	if envelope.Ok {
+		t.Fatalf("the document reports success: %q", stdout)
+	}
+	return envelope
+}
+
+// failureCode reads the stable code out of one failure document.
+func failureCode(t *testing.T, stdout string) string {
+	t.Helper()
+	return parseFailure(t, stdout).Error.Code
+}
+
 // startSession creates and starts a session, which every gate here needs before
 // it can drive an application. The session is closed again when the test ends,
 // so a gate leaves no container behind.
@@ -243,13 +273,18 @@ func (r resizeOutcome) requireAll(t *testing.T, width, height uint32) {
 
 // TestResizeCommit is the Phase 5 resize gate: a successful resize means the
 // application committed the size it was configured with, and nothing else is
-// reported as success.
+// reported as success. Each case runs in its own session, because a session
+// runs one application at a time.
 func TestResizeCommit(t *testing.T) {
-	h := newHarness(t)
-	h.startSession()
-
 	t.Run("a cooperative application commits the configured size", func(t *testing.T) {
-		h.startFixtureApplication("--title", "resize-cooperative", "--resize", "cooperative", "--exit-after", "10000")
+		h := newHarness(t)
+		h.startSession()
+
+		// The fixture keeps animating so the window outlives its resize: a
+		// cooperative fixture otherwise settles and exits as soon as it has
+		// committed the matching buffer.
+		h.startFixtureApplication("--title", "resize-cooperative", "--animate", "--frames", "200",
+			"--period", "40", "--resize", "cooperative", "--exit-after", "20000")
 		window := h.waitForTitledWindow("resize-cooperative")
 
 		envelope := h.succeed("resize", "--session", h.session, "--window", window.Handle,
@@ -260,11 +295,15 @@ func TestResizeCommit(t *testing.T) {
 			t.Fatalf("the resize result is unreadable: %v", err)
 		}
 		resized.requireAll(t, 640, 480)
+		// The compositor must agree, not only the reply.
 		h.waitForTitledWindowSize("resize-cooperative", 640, 480)
 	})
 
 	t.Run("a delayed commit is waited for instead of reported early", func(t *testing.T) {
-		h.startFixtureApplication("--title", "resize-delayed", "--resize", "delayed", "--resize-delay", "600", "--exit-after", "10000")
+		h := newHarness(t)
+		h.startSession()
+
+		h.startFixtureApplication("--title", "resize-delayed", "--resize", "delayed", "--resize-delay", "600", "--exit-after", "20000")
 		window := h.waitForTitledWindow("resize-delayed")
 
 		start := time.Now()
@@ -283,24 +322,51 @@ func TestResizeCommit(t *testing.T) {
 	})
 
 	t.Run("an application that ignores the configure times out", func(t *testing.T) {
-		h.startFixtureApplication("--title", "resize-ignored", "--resize", "ignore", "--exit-after", "10000")
+		h := newHarness(t)
+		h.startSession()
+
+		// The fixture keeps animating so it stays alive while ignoring the
+		// configure: an idle fixture of this mode settles and exits instead,
+		// which is the destroyed-window case below.
+		h.startFixtureApplication("--title", "resize-ignored", "--animate", "--frames", "200",
+			"--period", "40", "--resize", "ignore", "--exit-after", "20000")
 		window := h.waitForTitledWindow("resize-ignored")
 
 		stdout, stderr, code := h.run("resize", "--session", h.session, "--window", window.Handle,
-			"--width", "720", "--height", "540", "--timeout", "2s")
+			"--width", "720", "--height", "540", "--timeout", "3s")
 		if code == 0 {
 			t.Fatalf("a resize the application ignored was reported as success: %s", stdout)
 		}
 		if code != 5 {
 			t.Errorf("the resize exited %d, want 5 (timeout); stdout: %s stderr: %s", code, stdout, stderr)
 		}
-		if !contains(stdout+stderr, "wait_timeout") {
-			t.Errorf("the failure does not name wait_timeout: %s %s", stdout, stderr)
+		// A timeout must still say what the session observed, which is the whole
+		// point of reporting the four sizes: the application was configured with
+		// one size and is still showing another.
+		envelope := parseFailure(t, stdout)
+		if envelope.Error.Code != "wait_timeout" {
+			t.Errorf("the failure carries the code %q, want wait_timeout", envelope.Error.Code)
+		}
+		details := envelope.Error.Details
+		if details["configured"] != "720x540" {
+			t.Errorf("the failure reports configured=%q, want the size that was configured", details["configured"])
+		}
+		if details["visible"] == "" || details["visible"] == details["configured"] {
+			t.Errorf("the failure reports visible=%q, want the size the window still shows", details["visible"])
+		}
+		if _, ok := details["committed"]; !ok {
+			t.Errorf("the failure does not report a committed size: %v", details)
+		}
+		if _, ok := details["requested"]; !ok {
+			t.Errorf("the failure does not report the requested size: %v", details)
 		}
 	})
 
 	t.Run("an application that disappears during a resize is not a success", func(t *testing.T) {
-		h.startFixtureApplication("--title", "resize-abandoned", "--resize", "exit", "--exit-after", "10000")
+		h := newHarness(t)
+		h.startSession()
+
+		h.startFixtureApplication("--title", "resize-abandoned", "--resize", "exit", "--exit-after", "20000")
 		window := h.waitForTitledWindow("resize-abandoned")
 
 		stdout, stderr, code := h.run("resize", "--session", h.session, "--window", window.Handle,
@@ -354,8 +420,8 @@ func TestVisionInput(t *testing.T) {
 	if code != 4 {
 		t.Errorf("a click naming a stale revision exited %d, want 4; stdout: %s stderr: %s", code, stdout, stderr)
 	}
-	if !contains(stdout+stderr, "stale_revision") {
-		t.Errorf("the refusal does not name stale_revision: %s %s", stdout, stderr)
+	if failure := failureCode(t, stdout); failure != "stale_revision" {
+		t.Errorf("the refusal carries the code %q, want stale_revision (stdout: %s)", failure, stdout)
 	}
 }
 
@@ -485,7 +551,7 @@ func TestQuietStability(t *testing.T) {
 	h := newHarness(t)
 	h.startSession()
 
-	h.startFixtureApplication("--title", "stable-target", "--frames", "1", "--resize", "none", "--exit-after", "20000")
+	h.startFixtureApplication("--title", "stable-target", "--frames", "1", "--resize", "none", "--exit-after", "15000")
 	window := h.waitForTitledWindow("stable-target")
 
 	envelope := h.succeed("wait", "--session", h.session, "--stable-for", "300ms", "--timeout", "10s")
@@ -498,8 +564,12 @@ func TestQuietStability(t *testing.T) {
 	if err := json.Unmarshal(envelope.Result, &stable); err != nil {
 		t.Fatalf("the wait result is unreadable: %v", err)
 	}
-	if stable.Observations < 2 || stable.Probes < 1 {
-		t.Errorf("stability was proven with %d observations and %d probes, want at least two observations", stable.Observations, stable.Probes)
+	// Stability is a claim about comparable observations: at least two
+	// identical captures spanning the requested duration, which took at least
+	// one probe to establish.
+	if stable.Observations < 2 || stable.Probes < 2 {
+		t.Errorf("stability was proven with %d observations and %d probes, want at least two of each",
+			stable.Observations, stable.Probes)
 	}
 
 	first := h.captureFrame("before-resize")
@@ -510,8 +580,13 @@ func TestQuietStability(t *testing.T) {
 	if second.Revision <= first.Revision {
 		t.Errorf("the revision after the resize is %d, before it was %d", second.Revision, first.Revision)
 	}
-	if first.Width == second.Width && first.Height == second.Height {
-		t.Errorf("both captures are %dx%d, so the resize is not visible in the capture", first.Width, first.Height)
+	// A screenshot is the whole output, so the resize shows up in the picture
+	// the resized window draws, not in the size of the capture.
+	if first.Digest == second.Digest {
+		t.Errorf("the picture is unchanged after the window was resized (digest %s)", first.Digest)
+	}
+	if first.Format != second.Format {
+		t.Errorf("the capture format changed from %s to %s across a resize", first.Format, second.Format)
 	}
 
 	// A wait that cannot succeed must time out, report wait_timeout, and leave
