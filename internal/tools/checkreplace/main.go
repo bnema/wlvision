@@ -94,7 +94,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	found := make(map[string]string) // OLD => "dir: NEW"
+	found := make(map[string][]finding)
 	failed := false
 
 	for _, dir := range dirs {
@@ -106,42 +106,82 @@ func main() {
 		}
 		for _, entry := range entries {
 			key := entry.Old.String()
-			if _, seen := found[key]; !seen {
-				found[key] = dir + ": " + entry.New.String()
-			}
+			found[key] = append(found[key], finding{dir: dir, target: entry.New.String()})
 		}
 	}
 
-	if len(want) == 0 {
-		for _, key := range sortedKeys(found) {
-			owner, target, _ := strings.Cut(found[key], ": ")
-			fmt.Fprintf(os.Stderr, "checkreplace: %s: found replace %s => %s\n", owner, key, target)
-			failed = true
-		}
-		if failed {
-			os.Exit(1)
-		}
-		return
-	}
-
-	listed := make(map[string]bool, len(want))
-	for _, item := range want {
-		listed[item.old] = true
-		if _, ok := found[item.old]; !ok {
-			fmt.Fprintf(os.Stderr, "checkreplace: expected replace %s is missing\n", item)
-			failed = true
-		}
-	}
-	for _, key := range sortedKeys(found) {
-		if !listed[key] {
-			fmt.Fprintf(os.Stderr, "checkreplace: unexpected replace %s => %s is present\n", key, found[key])
-			failed = true
-		}
+	for _, complaint := range problems(found, want) {
+		fmt.Fprintf(os.Stderr, "checkreplace: %s\n", complaint)
+		failed = true
 	}
 
 	if failed {
 		os.Exit(1)
 	}
+}
+
+// finding is one replacement found in one module directory.
+type finding struct {
+	dir    string
+	target string
+}
+
+// problems compares the replacements found in the module graphs against what
+// the caller expects.
+//
+// Without expectations every replacement is a problem: a filesystem
+// replacement must never reach a released module file. With expectations both
+// halves of each pair matter, because a replacement that points at the wrong
+// checkout is exactly what this check exists to catch.
+func problems(found map[string][]finding, want expectations) []string {
+	var complaints []string
+
+	if len(want) == 0 {
+		for _, key := range sortedKeys(found) {
+			for _, item := range found[key] {
+				complaints = append(complaints, fmt.Sprintf("found replace %s => %s (%s)", key, item.target, item.dir))
+			}
+		}
+		return complaints
+	}
+
+	listed := make(map[string]bool, len(want))
+	for _, item := range want {
+		listed[item.old] = true
+
+		targets := found[item.old]
+		if len(targets) == 0 {
+			complaints = append(complaints, fmt.Sprintf("expected replace %s is missing", item))
+			continue
+		}
+		matched := false
+		for _, target := range targets {
+			if target.target == item.new {
+				matched = true
+			}
+		}
+		if !matched {
+			complaints = append(complaints, fmt.Sprintf("expected replace %s is missing; found %s", item, describe(targets)))
+		}
+	}
+
+	for _, key := range sortedKeys(found) {
+		if !listed[key] {
+			for _, item := range found[key] {
+				complaints = append(complaints, fmt.Sprintf("unexpected replace %s => %s (%s) is present", key, item.target, item.dir))
+			}
+		}
+	}
+	return complaints
+}
+
+// describe renders the targets found for one module path.
+func describe(found []finding) string {
+	parts := make([]string, 0, len(found))
+	for _, item := range found {
+		parts = append(parts, item.target+" ("+item.dir+")")
+	}
+	return strings.Join(parts, ", ")
 }
 
 func sortedKeys[V any](m map[string]V) []string {
