@@ -81,7 +81,42 @@ nor obtain the handle needed to activate, resize or close it. Weston's own test
 suite reaches the same conclusion: it runs a purpose-built shell
 (`tests/weston-test-desktop-shell.c`) whenever a test must observe surfaces.
 
-### Options
+### Resolution
+
+Option A was built and measured before committing to it: `test/weston-shell/`
+contains the smallest shell that proves the design, run against the pinned
+revision with no source patch. Its observed sequence for one client is:
+
+```text
+added app-1 title=wlvision-probe-title app_id=wlvision.probe geometry=0,0,0x0
+configured request_id=1 requested=320x240
+committed buffer=320x240 request_id=1 commit=1 matching=yes
+activated seat=default keyboard=yes keyboard_focus=yes
+configured request_id=2 requested=640x480
+committed buffer=640x480 request_id=2 commit=2 matching=yes
+removed app-1 live_toplevels=0
+```
+
+Two concurrent clients coexist as `app-1` and `app-2` with request ids
+continuing across runs, and a later run reuses neither handle. Enumeration,
+title, app id, geometry, view mapping, layer placement, activation, keyboard
+focus, xdg activated-state propagation and configure-to-commit resize therefore
+all work through installed public headers and exported symbols only.
+
+Three practical notes, none an API gap: a shell must paint something, because
+repainting an empty scene graph asserts, and `weston_shell_utils_curtain_create`
+is the public answer; keyboard focus needs a seat with a keyboard, which the
+headless backend only has with `--fake-seat`; and `weston_seat_set_keyboard_focus`
+is private while `weston_view_activate_input` is the public path. Weston's shell
+loader looks for `NAME-shell.so` and `wet_shell_init`, so a module named
+`wlvision-shell.so` is installed next to a `wlvision-shell-shell.so` symlink.
+
+**Option A is therefore the design.** wlvision ships the shell; the pinned
+revision stays unpatched, and the module can own window enumeration, activation,
+move, resize, close, input injection, capture authorization and frame
+sequencing.
+
+### The options that were weighed
 
 **A. wlvision ships the shell.** Weston runs with
 `shell=wlvision-control.so`; that module creates the `weston_desktop` instance,
@@ -95,15 +130,10 @@ has one output, no decorations, no panels and no session management.
 This contradicts the approved spec sentence "Weston runs with ... the normal
 desktop shell", so it needs an explicit decision.
 
-**B. Patch Weston in the image** to export the surface-to-desktop link or to
-broadcast desktop-surface lifecycle events. Smaller wlvision code and it keeps
+**B. Patch Weston in the image** — smaller wlvision code and it keeps
 desktop-shell, but it forks the compositor, breaks the "pinned revision, no
 source patch" property, and every future Weston bump must rebase the patch.
-
-Recommendation: **A**. It keeps the pinned revision unpatched, uses only headers
-Weston itself declares, and gives the control protocol the exact operations it
-promises. The shell subset it must implement is small and testable, and a
-purpose-built shell is exactly how upstream tests observe surfaces.
+This is not taken.
 
 ## Probe
 

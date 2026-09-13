@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+#
+# wlvision - pinned-Weston probe, build-input stage.
+#
+# This is the only stage allowed to use the network.  It fetches the Weston
+# source archive pinned by images/arch/weston.lock, verifies the archive
+# SHA-256 and the SHA-256 of every pinned source file, and pre-downloads the
+# build dependencies into /opt/weston-deps so that the verification stage
+# (test/weston-probe/Containerfile) can install them with --network=none.
+#
+# Pinned base image: archlinux:base-devel
+#   OCI index digest:   sha256:61f7de2dd88cc4ba1fe36c24cfe1a503c3936984492d6405eeab013ce6ac68c5
+#   linux/amd64 digest: sha256:5b987b0196907ea97dd10e7b48e7d403c35c0389986da015aa86cf8d0b058084
+FROM archlinux:base-devel@sha256:5b987b0196907ea97dd10e7b48e7d403c35c0389986da015aa86cf8d0b058084
+
+# Copied verbatim from images/arch/weston.lock.  The build context for this
+# file is test/weston-probe/ only, so the lock file cannot be COPYed in;
+# these values (and the file digests in the RUN further down) are the lock's
+# contents.  scripts/check-weston-baseline.sh validates the lock itself.
+ARG WESTON_SOURCE_URL=https://gitlab.freedesktop.org/wayland/weston/-/archive/16.0.0/weston-16.0.0.tar.gz
+ARG WESTON_SOURCE_SHA256=6a81af51045ccb2813f3a1d63ff8a66c121743c1a5ff3ce78388660bf650c55c
+
+# Everything the verification stage needs to configure, build and link
+# against Weston: the build system, Wayland, and libweston's required
+# dependencies (meson.build: wayland-server >= 1.22, pixman, xkbcommon,
+# libinput, libevdev, libdrm, libdisplay-info).
+#
+# cairo and libpng are not optional even with every shell and client
+# disabled: shared/meson.build builds deps_cairo_shared with
+# dependency('cairo') and dependency('libpng') unconditionally, and the
+# headless backend links deps_cairo_shared.
+ARG WESTON_BUILD_DEPS="meson ninja wayland wayland-protocols libxkbcommon libinput libevdev libdrm pixman libdisplay-info cairo libpng"
+
+# Bring the image up to the mirror snapshot before adding anything so the
+# cached dependency set is consistent with the installed system.
+RUN pacman -Syu --noconfirm
+
+# Only what is needed to fetch and verify.
+RUN pacman -S --noconfirm --needed curl ca-certificates
+
+# Fetch the pinned archive and fail the build unless its SHA-256 matches
+# source_archive_sha256 from the lock.
+RUN set -eux; \
+    curl --fail --location --show-error --silent --output /tmp/weston.tar.gz "${WESTON_SOURCE_URL}"; \
+    echo "${WESTON_SOURCE_SHA256}  /tmp/weston.tar.gz" | sha256sum -c -; \
+    mkdir -p /src/weston; \
+    tar -xzf /tmp/weston.tar.gz -C /src/weston --strip-components=1; \
+    rm -f /tmp/weston.tar.gz
+
+# Verify every file_sha256/* entry from the lock that exists in the archive.
+# file_sha256/protocol/weston-output-capture.xml is the vendored copy in this
+# repository; scripts/check-weston-baseline.sh checks that one against the
+# repository, so it is checked here against the archive instead.
+RUN set -eux; cd /src/weston; \
+    printf '%s  %s\n' \
+      '1e2638fd05f9532739ba3f855fddbc40a6a59b3fc4c27ab30478a64944fea8b7' 'protocol/weston-output-capture.xml' \
+      '56481acd1cad461547e9be3e5980e7f10782940945dea90f6f9541a9264304b5' 'include/libweston/libweston.h' \
+      'a66c422daf93028b63019bf3ab4de4dfdd2bcc3a33ccbff7cf8fcdc0db3fa24b' 'include/libweston/desktop.h' \
+      '88adcf0ed96c96a816c169af632a0d449006949e624b04e11f93e909c5ace410' 'libweston/output-capture.h' \
+      'e9859814a700a329db758c3f418696181b0690411a6d9ed75095cb70ff630dbf' 'include/libweston/backend-headless.h' \
+      '740d7917391c2563314f31201e66643ca56ae03b5c6a30c0b84b673ea8de3494' 'libweston/pixman-renderer.h' \
+    | sha256sum -c -
+
+# Download (do not install) the build dependencies into a private cache so the
+# verification stage can install the exact same set with --network=none.
+RUN set -eux; \
+    mkdir -p /opt/weston-deps; \
+    pacman -Syw --noconfirm --cachedir=/opt/weston-deps ${WESTON_BUILD_DEPS}

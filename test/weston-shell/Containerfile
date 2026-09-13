@@ -1,0 +1,99 @@
+# syntax=docker/dockerfile:1
+#
+# wlvision - purpose-built Weston shell probe, verification stage.
+#
+# Proves Option A of docs/weston-baseline.md inside a container: a shell
+# module owned by wlvision can enumerate, activate and resize an application
+# toplevel through the public libweston desktop API.
+#
+# This stage must build with --network=none: it never fetches anything.  It
+# starts from the image produced by Containerfile.inputs, which has already
+# fetched and digest-verified the pinned Weston archive into /src/weston and
+# pre-downloaded the build dependencies into /opt/weston-deps.
+#
+# Build (inputs first - this file FROMs that image by tag):
+#
+#   docker build -t wlvision-weston-inputs:local \
+#       -f test/weston-shell/Containerfile.inputs test/weston-shell
+#   docker build --network=none -t wlvision-weston-shell:local \
+#       -f test/weston-shell/Containerfile test/weston-shell
+#
+# The inputs stage is byte-identical to test/weston-probe/Containerfile.inputs
+# and uses the same image tag, so an already-built probe input image is reused
+# from cache.
+FROM wlvision-weston-inputs:local
+
+COPY wlvision-shell-probe.c /src/wlvision-shell-probe.c
+COPY wlvision-shell-client.c /src/wlvision-shell-client.c
+
+# Install the build dependencies from the cache the input stage prepared.
+RUN set -eux; \
+    pacman -U --noconfirm /opt/weston-deps/*.pkg.tar.zst
+
+# Configure and build only what this probe needs: libweston (which in 16.0.0
+# contains the former libweston-desktop), the headless backend and the pixman
+# renderer.  Every other backend, renderer, shell, client, tool, test and the
+# documentation are disabled.  backend-default must be headless because the
+# DRM backend it defaults to is disabled.  These are the exact options the
+# probe records in test/weston-probe/README.md.
+RUN set -eux; cd /src/weston; \
+    meson setup build --prefix=/usr \
+        -Dbackend-default=headless \
+        -Dbackend-headless=true \
+        -Dbackend-drm=false \
+        -Dbackend-wayland=false \
+        -Dbackend-x11=false \
+        -Dbackend-vnc=false \
+        -Dbackend-rdp=false \
+        -Dbackend-pipewire=false \
+        -Drenderer-gl=false \
+        -Drenderer-vulkan=false \
+        -Dxwayland=false \
+        -Dsystemd=false \
+        -Dcolor-management-lcms=false \
+        -Dimage-jpeg=false \
+        -Dimage-webp=false \
+        -Dshell-desktop=false \
+        -Dshell-ivi=false \
+        -Dshell-kiosk=false \
+        -Dshell-lua=false \
+        -Ddemo-clients=false \
+        -Dsimple-clients= \
+        -Dtests=false \
+        -Ddoc=false; \
+    ninja -C build; \
+    ninja -C build install
+
+# xdg-shell bindings straight from the wayland-protocols XML installed in the
+# image; no hand-written protocol XML.
+RUN set -eux; \
+    xml=/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml; \
+    test -f "${xml}"; \
+    wayland-scanner client-header "${xml}" /src/xdg-shell-client-protocol.h; \
+    wayland-scanner private-code "${xml}" /src/xdg-shell-protocol.c
+
+# Build the shell module against the freshly installed libweston and install
+# it into Weston's module directory.  Weston's shell loader appends
+# "-shell.so" to the [core] shell= name and looks up wet_shell_init(), so the
+# module is also reachable under that name; the file itself keeps the
+# wlvision-shell-probe.so name and exports wet_module_init as required.
+RUN set -eux; \
+    moddir="$(pkg-config --variable=libdir libweston-16)/weston"; \
+    mkdir -p "${moddir}"; \
+    cc -shared -fPIC -Wall -Wextra \
+       -o "${moddir}/wlvision-shell-probe.so" /src/wlvision-shell-probe.c \
+       $(pkg-config --cflags --libs libweston-16 wayland-server); \
+    ln -sf wlvision-shell-probe.so "${moddir}/wlvision-shell-probe-shell.so"; \
+    test -e "${moddir}/wlvision-shell-probe-shell.so"; \
+    nm -D --defined-only "${moddir}/wlvision-shell-probe.so" \
+        | grep -q ' T wet_module_init$'; \
+    nm -D --defined-only "${moddir}/wlvision-shell-probe.so" \
+        | grep -q ' T wet_shell_init$'; \
+    ls -l "${moddir}"
+
+# Build the client against libwayland-client and the generated bindings.
+RUN set -eux; \
+    cc -Wall -Wextra -o /usr/local/bin/wlvision-shell-client \
+       /src/wlvision-shell-client.c /src/xdg-shell-protocol.c \
+       $(pkg-config --cflags --libs wayland-client); \
+    ldd /usr/local/bin/wlvision-shell-client
