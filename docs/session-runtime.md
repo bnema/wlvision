@@ -29,13 +29,15 @@ supervisor creates the rest and owns it:
 | Path | Mode | Purpose |
 | --- | --- | --- |
 | `/run/wlvision/control` | 0700 | control socket, status file, readiness marker, pid files |
-| `/run/wlvision/wayland` | 0770 | the compositor's display socket |
+| `/run/wlvision/wayland` | 0755 | the compositor's display socket |
 | `/run/wlvision/payload` | 0755 | injected binaries and bundles |
 | `/run/wlvision/export` | 0700 | captures the controller stores |
 
-The display socket is readable by both identities because applications must
-connect to it; the control directory is not, and that is the asymmetry that
-matters. The mounts are world-writable with the sticky bit because the container
+The display socket is reachable by both identities because applications must
+connect to it, and the socket itself is world read-write for the same reason;
+the control directory is 0700, and that is the asymmetry that matters. The
+control global is refused to any other UID regardless of what the filesystem
+allows. The mounts are world-writable with the sticky bit because the container
 engine creates a tmpfs owned by root, and a session running as the control UID
 has to be able to create its own directories inside them.
 
