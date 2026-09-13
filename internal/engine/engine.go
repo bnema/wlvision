@@ -12,6 +12,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -203,6 +204,34 @@ type StreamSpec struct {
 	Stderr      io.Writer
 }
 
+// ExecResult reports how a container command ended. A non-zero exit code is a
+// result, not an engine failure: the command ran and said so.
+type ExecResult struct {
+	ExitCode int
+}
+
+// ErrNotFound reports that the engine no longer has the container. Cleanup
+// treats it as success so a retried close converges.
+var ErrNotFound = errors.New("engine: no such container")
+
+// ExitError reports a command that ran and exited non-zero. Adapters that
+// distinguish an application's status from an engine failure match on it.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+// Error implements error.
+func (e *ExitError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("exit status %d", e.Code)
+}
+
+// Unwrap exposes the underlying process error.
+func (e *ExitError) Unwrap() error { return e.Err }
+
 // ContainerState is the engine's view of a session container.
 type ContainerState struct {
 	Running    bool
@@ -221,8 +250,9 @@ type Engine interface {
 	Create(ctx context.Context, spec CreateSpec) (string, error)
 	// Start starts a created container. Starting a running container succeeds.
 	Start(ctx context.Context, id string) error
-	// Exec runs a command in the container and waits for it.
-	Exec(ctx context.Context, spec ExecSpec) error
+	// Exec runs a command in the container and waits for it. The command's own
+	// exit status is returned as a result.
+	Exec(ctx context.Context, spec ExecSpec) (ExecResult, error)
 	// Stream pipes a reader into a container command.
 	Stream(ctx context.Context, spec StreamSpec) error
 	// State reports whether the container runs and how it exited.
@@ -258,13 +288,27 @@ type CLIRunner struct {
 	Binary string
 }
 
-// Run implements CommandRunner.
+// Run implements CommandRunner. It reports a command that ran and exited
+// non-zero as an ExitError, so an adapter can tell an application's status
+// apart from a failure to reach the engine.
 func (r CLIRunner) Run(ctx context.Context, cmd Command) error {
 	command := exec.CommandContext(ctx, r.Binary, cmd.Args...)
 	command.Stdin = cmd.Stdin
 	command.Stdout = cmd.Stdout
 	command.Stderr = cmd.Stderr
-	return command.Run()
+
+	err := command.Run()
+	if err == nil {
+		return nil
+	}
+
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ProcessState != nil {
+		if code := exit.ProcessState.ExitCode(); code > 0 {
+			return &ExitError{Code: code, Err: err}
+		}
+	}
+	return err
 }
 
 // usageFailure reports a programming error in wlvision itself: the caller

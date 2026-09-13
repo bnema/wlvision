@@ -184,10 +184,12 @@ func (d *Docker) Start(ctx context.Context, id string) error {
 	return err
 }
 
-// Exec implements Engine.
-func (d *Docker) Exec(ctx context.Context, spec ExecSpec) error {
+// Exec implements Engine. The command's exit status belongs to the caller, so
+// it is returned as a result; only a failure to run the command at all is an
+// engine error.
+func (d *Docker) Exec(ctx context.Context, spec ExecSpec) (ExecResult, error) {
 	if spec.ContainerID == "" || len(spec.Argv) == 0 {
-		return usageFailure("engine.exec", "a container identifier and a command are required")
+		return ExecResult{}, usageFailure("engine.exec", "a container identifier and a command are required")
 	}
 
 	args := []string{"exec", "-i", "--user", strconv.FormatUint(uint64(spec.User), 10)}
@@ -200,13 +202,25 @@ func (d *Docker) Exec(ctx context.Context, spec ExecSpec) error {
 	args = append(args, spec.ContainerID)
 	args = append(args, spec.Argv...)
 
-	_, err := d.run(ctx, d.context, "engine.exec", Command{
+	stderr, merged := captureStderr(spec.Stderr)
+	err := d.runner.Run(ctx, Command{
 		Args:   d.args(args...),
 		Stdin:  spec.Stdin,
 		Stdout: spec.Stdout,
-		Stderr: spec.Stderr,
+		Stderr: merged,
 	})
-	return err
+
+	var exit *ExitError
+	switch {
+	case err == nil:
+		return ExecResult{}, nil
+	case errors.As(err, &exit):
+		// The command ran: its status is the caller's, not a failure to reach
+		// the engine.
+		return ExecResult{ExitCode: exit.Code}, nil
+	default:
+		return ExecResult{}, commandFailure("engine.exec", stderr.String(), err)
+	}
 }
 
 // Stream implements Engine.
@@ -238,7 +252,7 @@ func (d *Docker) State(ctx context.Context, id string) (ContainerState, error) {
 
 	out, err := d.output(ctx, d.context, "engine.state", "inspect", "--format", "{{json .State}}", id)
 	if err != nil {
-		return ContainerState{}, err
+		return ContainerState{}, missingContainer(err, id)
 	}
 
 	var reported struct {
@@ -294,7 +308,10 @@ func (d *Docker) Stop(ctx context.Context, id string, timeout time.Duration) err
 	_, err := d.run(ctx, d.context, "engine.stop", Command{
 		Args: d.args("stop", "--time", strconv.Itoa(seconds), id),
 	})
-	return err
+	if err != nil {
+		return missingContainer(err, id)
+	}
+	return nil
 }
 
 // Remove implements Engine. It forces removal: a session being closed must not
@@ -305,7 +322,10 @@ func (d *Docker) Remove(ctx context.Context, id string) error {
 	}
 
 	_, err := d.run(ctx, d.context, "engine.remove", Command{Args: d.args("rm", "--force", id)})
-	return err
+	if err != nil {
+		return missingContainer(err, id)
+	}
+	return nil
 }
 
 // contextName resolves the context this adapter talks to. Naming it makes the
@@ -353,17 +373,39 @@ func (d *Docker) output(ctx context.Context, contextName, operation string, args
 // for whatever fails. The caller's own stderr, when it has one, still receives
 // everything the engine printed.
 func (d *Docker) run(ctx context.Context, contextName, operation string, cmd Command) (*boundedBuffer, error) {
-	stderr := &boundedBuffer{limit: maxStderrDetails}
-	if cmd.Stderr == nil {
-		cmd.Stderr = stderr
-	} else {
-		cmd.Stderr = io.MultiWriter(cmd.Stderr, stderr)
-	}
+	stderr, merged := captureStderr(cmd.Stderr)
+	cmd.Stderr = merged
 
 	if err := d.runner.Run(ctx, cmd); err != nil {
 		return stderr, commandFailure(operation, stderr.String(), err)
 	}
 	return stderr, nil
+}
+
+// captureStderr returns the bounded diagnostic copy of a command's standard
+// error together with the writer the engine should be given.
+func captureStderr(caller io.Writer) (*boundedBuffer, io.Writer) {
+	stderr := &boundedBuffer{limit: maxStderrDetails}
+	if caller == nil {
+		return stderr, stderr
+	}
+	return stderr, io.MultiWriter(caller, stderr)
+}
+
+// missingContainer reports the CLI's answer for a container that no longer
+// exists. Unlike the engine API, the CLI has no structured reason, so its text
+// is the only signal available; anything else is a real failure.
+func missingContainer(err error, id string) error {
+	var failure *result.Failure
+	if !errors.As(err, &failure) || failure.Code != result.CodeEngineUnavailable {
+		return err
+	}
+
+	stderr := strings.ToLower(failure.Details["stderr"])
+	if strings.Contains(stderr, "no such object") || strings.Contains(stderr, "no such container") {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	return err
 }
 
 // commandFailure turns an engine CLI failure into the typed failure the exit

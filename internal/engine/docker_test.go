@@ -349,7 +349,7 @@ func TestDockerExecRunsAsTheApplicationIdentity(t *testing.T) {
 
 	stdin := strings.NewReader("payload")
 	var stdout, stderr strings.Builder
-	err := eng.Exec(context.Background(), ExecSpec{
+	_, err := eng.Exec(context.Background(), ExecSpec{
 		ContainerID: "c0ffee",
 		User:        1001,
 		WorkDir:     "/home/agent",
@@ -453,6 +453,75 @@ func TestDockerLogsAndLifecycleCommands(t *testing.T) {
 	if call := runner.lastCall(t); !containsAll(call.Args, []string{"rm", "--force", "c0ffee"}) {
 		t.Errorf("remove command = %v", call.Args)
 	}
+}
+
+func TestDockerExecReportsTheApplicationExitCode(t *testing.T) {
+	eng, _ := dockerWith(t, reply{
+		contains: []string{"exec"},
+		err:      &ExitError{Code: 3, Err: errors.New("exit status 3")},
+	})
+
+	// A command that ran and exited non-zero is a result, not an engine
+	// failure: the caller must see the application's status.
+	execution, err := eng.Exec(context.Background(), ExecSpec{
+		ContainerID: "c0ffee",
+		User:        1001,
+		Argv:        []string{"/bin/false"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if execution.ExitCode != 3 {
+		t.Errorf("ExitCode = %d, want 3", execution.ExitCode)
+	}
+}
+
+func TestDockerReportsAContainerTheEngineNoLongerHas(t *testing.T) {
+	missing := reply{
+		stderr: "Error: No such object: c0ffee",
+		err:    &exec.ExitError{},
+	}
+
+	t.Run("state", func(t *testing.T) {
+		eng, _ := dockerWith(t, reply{contains: []string{"inspect"}, stderr: missing.stderr, err: missing.err})
+
+		_, err := eng.State(context.Background(), "c0ffee")
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("State error = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("remove", func(t *testing.T) {
+		eng, _ := dockerWith(t, reply{contains: []string{"rm"}, stderr: missing.stderr, err: missing.err})
+
+		if err := eng.Remove(context.Background(), "c0ffee"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Remove error = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("stop", func(t *testing.T) {
+		eng, _ := dockerWith(t, reply{contains: []string{"stop"}, stderr: missing.stderr, err: missing.err})
+
+		if err := eng.Stop(context.Background(), "c0ffee", time.Second); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Stop error = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("another failure stays an engine failure", func(t *testing.T) {
+		eng, _ := dockerWith(t, reply{
+			contains: []string{"inspect"},
+			stderr:   "permission denied while trying to connect to the Docker daemon socket",
+			err:      &exec.ExitError{},
+		})
+
+		err := func() error { _, err := eng.State(context.Background(), "c0ffee"); return err }()
+		if errors.Is(err, ErrNotFound) {
+			t.Error("a daemon failure was reported as a missing container")
+		}
+		if failure := failureOf(t, err); failure.Code != result.CodeEngineUnavailable {
+			t.Errorf("code = %s, want %s", failure.Code, result.CodeEngineUnavailable)
+		}
+	})
 }
 
 func TestDockerStartTreatsAnAlreadyRunningContainerAsSuccess(t *testing.T) {
