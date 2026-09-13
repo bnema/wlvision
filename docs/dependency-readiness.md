@@ -99,6 +99,20 @@ Each fix carries a test that fails without it, and the module file that a
 release would use is checked: `git grep "=> \.\./" HEAD -- '*.mod'` finds no
 replacement in any of the three repositories.
 
+Two more defects surfaced while wlvision started using the libraries:
+
+- Generated objects stored event handlers in plain slices that dispatch read
+  while registration wrote them. Any client that registers a handler after the
+  object exists while another goroutine dispatches raced, which the race
+  detector caught. Generated objects with events now carry a mutex and dispatch
+  through a snapshot taken under it.
+- Generated enum constants were typed `int32` while the events carrying them
+  decode to `uint32`, so callers cast between two spellings of the same wire
+  word. Enum values are now untyped.
+
+WLTurbo's `wl` shim also re-exports the transport's error types, so a caller
+that imports it can classify a failure without also importing the root package.
+
 ### Applied deviations from the plan
 
 - `internal/protocols/*.go` are hand-written protocol facades with listener
