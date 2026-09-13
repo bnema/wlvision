@@ -133,9 +133,10 @@ func TestReceiveBinaryValid(t *testing.T) {
 		mode uint32
 		want os.FileMode
 	}{
-		{"0o777 is reduced to 0o700", 0o777, 0o700},
-		{"0o4755 loses setuid", 0o4755, 0o700},
-		{"0o644 is reduced to 0o600", 0o644, 0o600},
+		{"0o777 is reduced to 0o755", 0o777, 0o755},
+		{"0o4755 loses setuid", 0o4755, 0o755},
+		{"0o666 drops group and other write", 0o666, 0o644},
+		{"0o644 is kept", 0o644, 0o644},
 		{"0o600 is kept", 0o600, 0o600},
 		{"0o700 is kept", 0o700, 0o700},
 	}
@@ -245,10 +246,12 @@ func TestReceiveTarValid(t *testing.T) {
 	if got := namesIn(t, res.Path); !slices.Equal(got, []string{"bin", "notes.txt"}) {
 		t.Errorf("bundle holds %v, want [bin notes.txt]", got)
 	}
-	assertMode(t, res.Path, 0o700)
-	assertMode(t, filepath.Join(res.Path, "bin"), 0o700)
-	assertMode(t, filepath.Join(res.Path, "bin", "run"), 0o700)
-	assertMode(t, filepath.Join(res.Path, "notes.txt"), 0o600)
+	// The application identity, not the control identity that owns the files,
+	// has to read and execute what was received.
+	assertMode(t, res.Path, 0o755)
+	assertMode(t, filepath.Join(res.Path, "bin"), 0o755)
+	assertMode(t, filepath.Join(res.Path, "bin", "run"), 0o755)
+	assertMode(t, filepath.Join(res.Path, "notes.txt"), 0o644)
 	assertFileContent(t, filepath.Join(res.Path, "bin", "run"), "#!/bin/sh\necho run\n")
 	assertFileContent(t, filepath.Join(res.Path, "notes.txt"), "notes\n")
 	assertPayloadDir(t, dir, "bundle")

@@ -51,19 +51,22 @@ const (
 	// into. The random suffix comes from os.MkdirTemp.
 	stagingPrefix = ".staging-"
 	// payloadPermMask is the permission policy applied to a requested mode.
-	// Only owner bits survive: setuid, setgid, sticky, and every group or
-	// other bit are dropped, so a payload can never be group or world
-	// writable, readable, or executable by accident.
-	payloadPermMask os.FileMode = 0o700
+	// It keeps what the application identity needs to read and execute a
+	// payload — injected code runs as the application UID, not as the control
+	// UID that owns it — while dropping group and other write and every
+	// setuid, setgid, and sticky bit.
+	payloadPermMask os.FileMode = 0o755
+	// nonExecMask is the policy for a payload that asked for no execute bit.
+	nonExecMask os.FileMode = 0o644
 	// dirPerm is the mode of every directory created while extracting a tar
-	// bundle.
-	dirPerm os.FileMode = 0o700
+	// bundle. The application identity has to traverse it.
+	dirPerm os.FileMode = 0o755
 	// filePerm is the mode a file is created with before its final mode is
 	// applied, so no intermediate state is wider than the payload policy.
 	filePerm os.FileMode = 0o600
 	// defaultBinaryPerm is the mode used when a binary payload requests no
-	// permission bits at all.
-	defaultBinaryPerm os.FileMode = 0o700
+	// permission bits at all: an injected binary is meant to be run.
+	defaultBinaryPerm os.FileMode = 0o755
 )
 
 // Kind selects how the payload stream is interpreted.
@@ -83,8 +86,9 @@ const (
 //
 // Mode is the requested permission bits. It is only meaningful for a binary
 // payload and is masked by the receiver's policy; for a tar bundle each entry
-// carries its own mode. A zero Mode on a binary requests the default 0o700,
-// because a payload with no permission bits at all could not be used.
+// carries its own mode. A zero Mode on a binary requests an executable
+// payload (0o755), because a payload with no permission bits at all could not
+// be used.
 //
 // MaxBytes bounds the stream and MaxFiles bounds the number of tar entries. A
 // zero MaxBytes means defaultMaxBytes (64 MiB), a zero or negative MaxFiles
@@ -151,6 +155,12 @@ func Receive(ctx context.Context, dir string, spec Spec, source io.Reader) (Resu
 	stagingPath, err := os.MkdirTemp(absDir, stagingPrefix)
 	if err != nil {
 		return Result{}, rejectedDetail("payload directory is not writable", err.Error())
+	}
+	// For a bundle the staging directory becomes the bundle itself, and the
+	// application identity has to traverse it; MkdirTemp is subject to the
+	// process umask, this policy is not.
+	if err := os.Chmod(stagingPath, dirPerm); err != nil {
+		return Result{}, rejectedDetail("cannot set the payload directory mode", err.Error())
 	}
 	stagingName := filepath.Base(stagingPath)
 	installed := false
@@ -493,23 +503,28 @@ func (t *pathTree) insert(name string) {
 }
 
 // maskBinaryMode applies the payload permission policy to a requested binary
-// mode. A zero request means the caller expressed no preference and gets the
-// default.
+// mode. A zero request means the caller expressed no preference and gets an
+// executable payload.
 func maskBinaryMode(mode uint32) os.FileMode {
 	if mode == 0 {
 		return defaultBinaryPerm
 	}
-	return os.FileMode(mode) & payloadPermMask
+	return maskMode(os.FileMode(mode))
 }
 
-// maskTarMode applies the payload permission policy to a tar entry mode. The
-// owner execute bit is kept only when the entry asked for execute permission.
+// maskTarMode applies the payload permission policy to a tar entry mode.
 func maskTarMode(mode int64) os.FileMode {
-	permission := os.FileMode(mode) & payloadPermMask
-	if os.FileMode(mode)&0o111 == 0 {
-		permission &^= 0o100
+	return maskMode(os.FileMode(mode))
+}
+
+// maskMode keeps owner, group, and other read, and the execute bits only when
+// the request asked for at least one of them. Write for group and other, and
+// every setuid, setgid, and sticky bit, are dropped.
+func maskMode(requested os.FileMode) os.FileMode {
+	if requested&0o111 == 0 {
+		return requested & nonExecMask
 	}
-	return permission
+	return requested & payloadPermMask
 }
 
 // limitedBound returns the hard read bound for limit: one byte more than the
