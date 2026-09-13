@@ -102,6 +102,7 @@ func Connect(ctx context.Context, socketPath string) (Client, error) {
 		display:   display,
 		pending:   make(map[uint32]*pendingCall),
 		toplevels: make(map[Handle]Toplevel),
+		removed:   make(map[Handle]struct{}),
 		frames:    make(chan Frame, 64),
 		closed:    make(chan struct{}),
 		done:      make(chan struct{}),
@@ -165,6 +166,7 @@ type client struct {
 	nextRequestID uint32
 	pending       map[uint32]*pendingCall
 	toplevels     map[Handle]Toplevel
+	removed       map[Handle]struct{}
 	revision      Revision
 	closedFlag    bool
 
@@ -215,6 +217,9 @@ func (c *client) registerHandlers(controller *generated.WlvisionController) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		delete(c.toplevels, Handle(handle))
+		// Handles are never reused in a session, so remembering that one is
+		// gone stops a snapshot that predates the removal from reviving it.
+		c.removed[Handle(handle)] = struct{}{}
 		for _, call := range c.pending {
 			if call.snapshot != nil {
 				*call.snapshot = removeToplevel(*call.snapshot, Handle(handle))
@@ -346,13 +351,15 @@ func (c *client) Snapshot(ctx context.Context) (State, error) {
 	}
 
 	c.mu.Lock()
-	c.toplevels = make(map[Handle]Toplevel, len(toplevels))
-	for _, toplevel := range toplevels {
-		c.toplevels[toplevel.Handle] = toplevel
+	mergeSnapshot(c.toplevels, c.removed, toplevels)
+	state := make([]Toplevel, 0, len(c.toplevels))
+	for _, toplevel := range c.toplevels {
+		state = append(state, toplevel)
 	}
 	c.mu.Unlock()
 
-	return State{Revision: result.revision, Toplevels: toplevels}, nil
+	sortToplevels(state)
+	return State{Revision: result.revision, Toplevels: state}, nil
 }
 
 func (c *client) Activate(ctx context.Context, handle Handle, revision Revision) (State, error) {
@@ -510,6 +517,24 @@ func buttonState(pressed bool) uint32 {
 	return 0
 }
 
+// mergeSnapshot folds one snapshot enumeration into the cached window state.
+//
+// A snapshot lists the windows that existed when it was requested, but events
+// that arrived afterwards have already updated the cache, so an entry that is
+// newer than the snapshot wins and a handle that was removed is not revived.
+func mergeSnapshot(cached map[Handle]Toplevel, removed map[Handle]struct{}, snapshot []Toplevel) {
+	for _, toplevel := range snapshot {
+		if _, gone := removed[toplevel.Handle]; gone {
+			continue
+		}
+		if known, ok := cached[toplevel.Handle]; ok && known.Revision >= toplevel.Revision {
+			continue
+		}
+		cached[toplevel.Handle] = toplevel
+	}
+}
+
+// upsertToplevel replaces a window in a list or appends it.
 func upsertToplevel(toplevels []Toplevel, toplevel Toplevel) []Toplevel {
 	for i := range toplevels {
 		if toplevels[i].Handle == toplevel.Handle {

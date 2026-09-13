@@ -533,3 +533,40 @@ func waitForNext(t *testing.T, srv *controltest.Server, index int, iface string,
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// A snapshot lists the windows that existed when it was requested. Events that
+// arrived afterwards have already updated the cache, and a snapshot must not
+// undo them: a window that moved on keeps its newer state, and a window that
+// was removed stays removed.
+func TestMergeSnapshotKeepsNewerStateAndRemovedHandles(t *testing.T) {
+	cached := map[Handle]Toplevel{
+		"app-1": {Handle: "app-1", Title: "newer", Revision: 5},
+		"app-4": {Handle: "app-4", Title: "unchanged", Revision: 9},
+	}
+	removed := map[Handle]struct{}{"app-2": {}}
+
+	snapshot := []Toplevel{
+		{Handle: "app-1", Title: "stale", Revision: 3},
+		{Handle: "app-2", Title: "gone", Revision: 7},
+		{Handle: "app-3", Title: "new", Revision: 7},
+		{Handle: "app-4", Title: "same revision", Revision: 9},
+	}
+
+	mergeSnapshot(cached, removed, snapshot)
+
+	if got := cached["app-1"].Title; got != "newer" {
+		t.Errorf("app-1 title = %q, want the newer cached state", got)
+	}
+	if _, ok := cached["app-2"]; ok {
+		t.Error("a removed window was revived by a snapshot")
+	}
+	if got := cached["app-3"].Title; got != "new" {
+		t.Errorf("app-3 title = %q, want the window the snapshot added", got)
+	}
+	if got := cached["app-4"].Title; got != "unchanged" {
+		t.Errorf("app-4 title = %q, want the cached state to win a tie", got)
+	}
+	if len(cached) != 3 {
+		t.Errorf("cached windows = %d, want 3", len(cached))
+	}
+}
