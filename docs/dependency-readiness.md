@@ -71,7 +71,7 @@ The transport decision record with the limits of this evidence is
 | One canonical generator | `scanner` is the only generator; the stub generator `tools/generate.go` and its dead output `output_management/generated.go` are deleted |
 | Generated tree reproducible | `go test ./scanner` regenerates `scanner/testdata/protocol_fixture.xml` and requires byte equality with the committed `internal/protocoltest/bindings.go`, twice, from different input paths |
 | Generated request/event roundtrip green | `go test ./internal/protocoltest` binds generated objects against the in-process compositor and asserts bind requests, new_id allocation and argument position, fixed point, string, array, nil-object, out-of-band descriptor, event decoding including a server-created object, and destructor unregistration |
-| Virtual pointer and keyboard smoke green on a pinned headless compositor | `bash test/integration/run.sh` builds a digest-pinned Alpine image (`sha256:48b0309c…`) running sway 1.10.1 on the headless pixman backend and passes every consumer assertion |
+| Virtual pointer and keyboard smoke green on a pinned headless compositor | `bash test/integration/run.sh` builds a digest-pinned Alpine image (`sha256:48b0309c…`) running sway 1.10.1 on the headless pixman backend; the consumer maps a real `xdg_toplevel` and the fixture observes the injected input — pointer enter, motion, button press and release, keyboard enter, modifiers and a key transition — rather than only the acceptance of the requests |
 | Standalone consumer compiles and runs | `test/consumer` is a separate module; its committed module file has no filesystem replacement, and the harness applies local replacements in a throwaway modfile |
 | No package reports success without sending a request | `keyboard_shortcuts_inhibitor` binds the global, sends `inhibit_shortcuts`, decodes `active`/`inactive`, surfaces compositor errors and destroys both objects; that path is exercised live against sway |
 
@@ -109,6 +109,11 @@ Two more defects surfaced while wlvision started using the libraries:
 - Generated enum constants were typed `int32` while the events carrying them
   decode to `uint32`, so callers cast between two spellings of the same wire
   word. Enum values are now untyped.
+- Generated enum entry constants ignored the interface they came from, so a
+  protocol declaring the same entry in two interfaces — xdg-shell declares
+  `invalid_size` on both `xdg_surface` and `xdg_toplevel` — produced duplicate
+  declarations and did not compile. Colliding entries are now qualified with
+  their interface; unique names keep their long-standing form.
 
 WLTurbo's `wl` shim also re-exports the transport's error types, so a caller
 that imports it can classify a failure without also importing the root package.
@@ -145,6 +150,13 @@ that imports it can classify a failure without also importing the root package.
   connections is not observable through the public API. Tests can detect it only
   on the connection they own. The live fixture compensates by round-tripping on
   the connection it owns after each injection.
+- Generated bindings for the core `wl_*` interfaces still map to the transport's
+  compatibility shims, whose `Dispatch` is a no-op and whose `new_id` results do
+  not expose the child's methods. Anything that must receive core events or
+  build a child object therefore generates the core interfaces with the scanner
+  and issues the few requests the shims cannot express, as the sway fixture
+  does. The durable fix is to generate the core interfaces in the library and
+  retire the shims.
 - No `weston-output-capture.xml` fixture is vendored yet: the pinned Weston
   revision is selected in Phase 2, and copying that XML before the lock exists
   would pin nothing.
