@@ -35,6 +35,40 @@ func (f Format) String() string {
 	}
 }
 
+// DRM format codes as the compositor reports them in the capture protocol's
+// format event. These are four-character codes, not the small enum wl_shm uses
+// when a client creates a buffer.
+const (
+	drmFormatARGB8888 = 0x34325241 // 'AR24'
+	drmFormatXRGB8888 = 0x34325258 // 'XR24'
+)
+
+// DRMCode returns the format's four-character code, which is what the capture
+// protocol announces.
+func (f Format) DRMCode() uint32 {
+	switch f {
+	case FormatARGB8888:
+		return drmFormatARGB8888
+	case FormatXRGB8888:
+		return drmFormatXRGB8888
+	default:
+		return 0
+	}
+}
+
+// FormatFromDRM maps a four-character format code to an accepted buffer
+// format, refusing anything wlvision cannot decode.
+func FormatFromDRM(code uint32) (Format, error) {
+	switch code {
+	case drmFormatARGB8888:
+		return FormatARGB8888, nil
+	case drmFormatXRGB8888:
+		return FormatXRGB8888, nil
+	default:
+		return 0, fmt.Errorf("unsupported DRM format 0x%08x", code)
+	}
+}
+
 // Decode converts a compositor buffer into a tightly packed RGBA image.
 //
 // The buffer arrives as little-endian words whose memory order is B, G, R, A

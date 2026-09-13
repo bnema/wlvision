@@ -157,6 +157,40 @@ func TestDigestDistinguishesPictures(t *testing.T) {
 	}
 }
 
+func TestFormatFromDRM(t *testing.T) {
+	cases := []struct {
+		name string
+		code uint32
+		want Format
+	}{
+		{name: "argb8888", code: 0x34325241, want: FormatARGB8888},
+		{name: "xrgb8888", code: 0x34325258, want: FormatXRGB8888},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FormatFromDRM(tc.code)
+			if err != nil {
+				t.Fatalf("FormatFromDRM(0x%08x): %v", tc.code, err)
+			}
+			if got != tc.want {
+				t.Fatalf("FormatFromDRM(0x%08x) = %s, want %s", tc.code, got, tc.want)
+			}
+			if got.DRMCode() != tc.code {
+				t.Fatalf("round trip of 0x%08x = 0x%08x", tc.code, got.DRMCode())
+			}
+		})
+	}
+
+	// A format wlvision cannot decode must be refused, not guessed at.
+	if _, err := FormatFromDRM(0x34325258 + 1); err == nil {
+		t.Fatal("FormatFromDRM accepted an unsupported format code")
+	}
+	if Format(99).DRMCode() != 0 {
+		t.Fatal("an unknown Format reported a DRM code")
+	}
+}
+
 func TestEncodePNGRoundTrips(t *testing.T) {
 	pixels := []byte{0x33, 0x22, 0x11, 0xff}
 	img, err := Decode(FormatARGB8888, 4, 1, 1, pixels)
