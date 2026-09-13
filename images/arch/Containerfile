@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+#
+# wlvision session image for the pinned Weston.
+#
+# The image is the whole runtime of one session: the compositor with its
+# wlvision shell, and the four binaries a session runs. It builds on the shell
+# image, which already carries the pinned Weston revision built and installed,
+# and adds nothing else that the session could reach the host with.
+#
+# Only wlvision's own state is writable at runtime, and the container engine
+# provides those mounts; the image itself is read-only.
+FROM wlvision-weston-shell:local
+
+# The shell module is compiled against the pinned Weston's own pkg-config
+# metadata, so a Weston upgrade cannot silently change its ABI.
+COPY weston-module /src/weston-module
+RUN cd /src/weston-module \
+    && gcc -shared -fPIC -Wall -Wextra -Wno-unused-parameter \
+         -o /usr/lib/weston/wlvision-shell.so \
+         wlvision-shell.c generated/wlvision-control-protocol.c \
+         $(pkg-config --cflags --libs weston) \
+    # Weston's shell loader resolves a shell named NAME through NAME-shell.so.
+    && ln -sf /usr/lib/weston/wlvision-shell.so /usr/lib/weston/wlvision-shell-shell.so \
+    && rm -rf /src/weston-module
+
+# The session's binaries, cross-compiled for this image.
+COPY bin/wlvision-supervisor bin/wlvision-agent bin/wlvision-call bin/wlvision /usr/libexec/
+RUN chmod 755 /usr/libexec/wlvision /usr/libexec/wlvision-supervisor \
+              /usr/libexec/wlvision-agent /usr/libexec/wlvision-call
+
+# The application identity's home is a mount the engine provides; the directory
+# exists in the image so a run without that mount still has a HOME.
+RUN mkdir -p /home/agent
