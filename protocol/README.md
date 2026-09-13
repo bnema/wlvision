@@ -9,5 +9,12 @@ pinned source archive recorded in `../images/arch/weston.lock`. Do not edit it:
 pin, which is what makes drift visible.
 
 Weston generates this protocol internally and does not install it, so wlvision
-keeps its own copy and generates the capture bindings from it. The project-owned
-`wlvision-control.xml` will live next to it.
+keeps its own copy and generates the capture bindings from it.
+
+## wlvision-control.xml
+
+Project-owned protocol, versioned here and generated into
+`internal/control/generated/` for the Go controller and
+`weston-module/generated/` for the compositor module. Its contract is asserted
+by `internal/control/protocol_test.go`, which is the file to change first when
+an operation is added.
