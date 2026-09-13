@@ -246,6 +246,9 @@ type Engine interface {
 	Kind() Kind
 	// Capabilities inspects the engine and refuses one wlvision cannot use.
 	Capabilities(ctx context.Context) (Capabilities, error)
+	// Build builds an image from a generated context and returns its id. It is
+	// the only operation that may use the network, and only for the build.
+	Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 	// Create creates a stopped container and returns its identifier.
 	Create(ctx context.Context, spec CreateSpec) (string, error)
 	// Start starts a created container. Starting a running container succeeds.

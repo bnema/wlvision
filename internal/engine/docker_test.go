@@ -599,3 +599,134 @@ func TestCommandFailureKeepsStderrBounded(t *testing.T) {
 		t.Errorf("stderr details are %d bytes, want them bounded", len(failure.Details["stderr"]))
 	}
 }
+
+func TestDockerBuildConstructsTheCommand(t *testing.T) {
+	eng, runner := dockerWith(t,
+		reply{contains: []string{"build"}, stdout: "build output\n"},
+		reply{contains: []string{"image", "inspect"}, stdout: "sha256:c0ffee\n"},
+	)
+
+	var stdout strings.Builder
+	built, err := eng.Build(context.Background(), BuildSpec{
+		Context:       "/tmp/wlvision-build",
+		Containerfile: "Containerfile",
+		Tag:           "wlvision-build:abc123",
+		Stdout:        &stdout,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if built.ImageID != "sha256:c0ffee" {
+		t.Errorf("ImageID = %q, want the inspected id", built.ImageID)
+	}
+	if stdout.String() != "build output\n" {
+		t.Errorf("the build output was not forwarded: %q", stdout.String())
+	}
+
+	if len(runner.calls) != 2 {
+		t.Fatalf("the engine ran %d commands, want a build and an inspect", len(runner.calls))
+	}
+	want := []string{"--context", "wlvision-test", "build", "--network=none", "--file", "Containerfile", "--tag", "wlvision-build:abc123", "/tmp/wlvision-build"}
+	if strings.Join(runner.calls[0].Args, " ") != strings.Join(want, " ") {
+		t.Errorf("build command = %v, want %v", runner.calls[0].Args, want)
+	}
+	if !containsAll(runner.calls[1].Args, []string{"image", "inspect", "--format", "{{.Id}}", "wlvision-build:abc123"}) {
+		t.Errorf("inspect command = %v", runner.calls[1].Args)
+	}
+}
+
+func TestDockerBuildAllowsTheNetworkOnlyWhenAsked(t *testing.T) {
+	eng, runner := dockerWith(t,
+		reply{contains: []string{"build"}},
+		reply{contains: []string{"image", "inspect"}, stdout: "sha256:1\n"},
+	)
+
+	if _, err := eng.Build(context.Background(), BuildSpec{
+		Context:       "/tmp/wlvision-build",
+		Containerfile: "Containerfile",
+		Tag:           "wlvision-build:abc123",
+		Network:       true,
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !containsAll(runner.calls[0].Args, []string{"--network=default"}) {
+		t.Errorf("build command = %v, want the network allowed", runner.calls[0].Args)
+	}
+}
+
+func TestDockerBuildRefusesAnIncompleteSpec(t *testing.T) {
+	eng, runner := dockerWith(t)
+
+	tests := []struct {
+		name string
+		spec BuildSpec
+	}{
+		{name: "empty context", spec: BuildSpec{Tag: "tag", Containerfile: "Containerfile"}},
+		{name: "relative context", spec: BuildSpec{Context: "relative", Tag: "tag", Containerfile: "Containerfile"}},
+		{name: "empty tag", spec: BuildSpec{Context: "/tmp/context", Containerfile: "Containerfile"}},
+		{name: "empty Containerfile", spec: BuildSpec{Context: "/tmp/context", Tag: "tag"}},
+		{name: "absolute Containerfile", spec: BuildSpec{Context: "/tmp/context", Tag: "tag", Containerfile: "/etc/Containerfile"}},
+		{name: "nested Containerfile", spec: BuildSpec{Context: "/tmp/context", Tag: "tag", Containerfile: "sub/Containerfile"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := eng.Build(context.Background(), test.spec); err == nil {
+				t.Fatal("the spec was accepted")
+			} else if failure := failureOf(t, err); failure.Code != result.CodeUsageError {
+				t.Errorf("code = %s, want %s", failure.Code, result.CodeUsageError)
+			}
+		})
+	}
+
+	if len(runner.calls) != 0 {
+		t.Errorf("the engine ran %d commands for invalid specs", len(runner.calls))
+	}
+}
+
+func TestDockerBuildReportsAFailedBuild(t *testing.T) {
+	eng, runner := dockerWith(t, reply{
+		contains: []string{"build"},
+		stderr:   "ERROR: failed to solve: process did not complete successfully\n",
+		err:      &exec.ExitError{},
+	})
+
+	_, err := eng.Build(context.Background(), BuildSpec{
+		Context:       "/tmp/wlvision-build",
+		Containerfile: "Containerfile",
+		Tag:           "wlvision-build:abc123",
+	})
+	if err == nil {
+		t.Fatal("a failed build was reported as success")
+	}
+
+	failure := failureOf(t, err)
+	if failure.Code != result.CodeImageUnavailable {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeImageUnavailable)
+	}
+	if !strings.Contains(failure.Details["build_output"], "failed to solve") {
+		t.Errorf("details = %v, want the build output", failure.Details)
+	}
+	if len(runner.calls) != 1 {
+		t.Errorf("the engine ran %d commands after a failed build, want 1", len(runner.calls))
+	}
+}
+
+func TestDockerBuildRefusesAnImageWithoutAnIdentifier(t *testing.T) {
+	eng, _ := dockerWith(t,
+		reply{contains: []string{"build"}},
+		reply{contains: []string{"image", "inspect"}, stdout: "\n"},
+	)
+
+	_, err := eng.Build(context.Background(), BuildSpec{
+		Context:       "/tmp/wlvision-build",
+		Containerfile: "Containerfile",
+		Tag:           "wlvision-build:abc123",
+	})
+	if err == nil {
+		t.Fatal("a build without an image id was accepted")
+	}
+	if failure := failureOf(t, err); failure.Code != result.CodeImageUnavailable {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeImageUnavailable)
+	}
+}

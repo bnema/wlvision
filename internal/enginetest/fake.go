@@ -38,9 +38,14 @@ type Fake struct {
 	// Status is the JSON body the fake supervisor reports to a readiness
 	// probe. Tests set it to describe a starting, ready, or broken session.
 	Status string
+	// BuildValue answers Build. BuildOutput, when set, is written to the
+	// build's standard output so a caller sees a build transcript.
+	BuildValue  engine.BuildResult
+	BuildOutput string
 
 	// Failure injection. A non-nil error is returned by the matching method.
 	CapabilitiesErr error
+	BuildErr        error
 	CreateErr       error
 	StartErr        error
 	StopErr         error
@@ -55,6 +60,7 @@ type Fake struct {
 	StreamFunc func(spec engine.StreamSpec) error
 
 	calls      []string
+	builds     []engine.BuildSpec
 	containers map[string]*Container
 	nextID     int
 	mu         sync.Mutex
@@ -87,6 +93,33 @@ func (f *Fake) Kind() engine.Kind { return engine.KindDocker }
 func (f *Fake) Capabilities(context.Context) (engine.Capabilities, error) {
 	f.record("capabilities")
 	return f.CapabilitiesValue, f.CapabilitiesErr
+}
+
+// Build implements engine.Engine. It records the spec and answers from
+// BuildValue, or fails with BuildErr before answering at all.
+func (f *Fake) Build(_ context.Context, spec engine.BuildSpec) (engine.BuildResult, error) {
+	f.record(fmt.Sprintf("build %s network=%t", spec.Tag, spec.Network))
+
+	f.mu.Lock()
+	f.builds = append(f.builds, spec)
+	f.mu.Unlock()
+
+	if spec.Stdout != nil && f.BuildOutput != "" {
+		if _, err := io.WriteString(spec.Stdout, f.BuildOutput); err != nil {
+			return engine.BuildResult{}, err
+		}
+	}
+	if f.BuildErr != nil {
+		return engine.BuildResult{}, f.BuildErr
+	}
+	return f.BuildValue, nil
+}
+
+// Builds returns the recorded build specs in order.
+func (f *Fake) Builds() []engine.BuildSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]engine.BuildSpec(nil), f.builds...)
 }
 
 // Create implements engine.Engine.

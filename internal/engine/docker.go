@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -107,6 +108,56 @@ func (d *Docker) Capabilities(ctx context.Context) (Capabilities, error) {
 		return Capabilities{}, err
 	}
 	return capabilities, nil
+}
+
+// Build implements Engine. It builds the generated context wlvision staged;
+// the spec names one context, one Containerfile inside it, one tag, and
+// whether the build may use the network. Nothing else about the build is
+// caller-controlled, and a session never uses the network mode set here.
+func (d *Docker) Build(ctx context.Context, spec BuildSpec) (BuildResult, error) {
+	switch {
+	case spec.Context == "" || !filepath.IsAbs(spec.Context):
+		return BuildResult{}, usageFailure("engine.build", "the build context must be an absolute directory")
+	case spec.Tag == "":
+		return BuildResult{}, usageFailure("engine.build", "an image tag is required")
+	case spec.Containerfile == "":
+		return BuildResult{}, usageFailure("engine.build", "a Containerfile name is required")
+	}
+	if filepath.IsAbs(spec.Containerfile) || spec.Containerfile == "." || spec.Containerfile == ".." || strings.ContainsAny(spec.Containerfile, `/:\\`) {
+		return BuildResult{}, usageFailure("engine.build",
+			"the Containerfile %q is not a name inside the build context", spec.Containerfile)
+	}
+
+	network := "none"
+	if spec.Network {
+		network = "default"
+	}
+
+	stderr, merged := captureStderr(spec.Stderr)
+	err := d.runner.Run(ctx, Command{
+		Args:   d.args("build", "--network="+network, "--file", spec.Containerfile, "--tag", spec.Tag, spec.Context),
+		Stdout: spec.Stdout,
+		Stderr: merged,
+	})
+	if err != nil {
+		failure := result.NewFailure(result.CodeImageUnavailable, "engine.build",
+			"the engine could not build %s: %v", spec.Tag, err)
+		if output := strings.TrimSpace(stderr.String()); output != "" {
+			failure.Details = map[string]string{"build_output": output}
+		}
+		return BuildResult{}, failure
+	}
+
+	id, err := d.output(ctx, d.context, "engine.build", "image", "inspect", "--format", "{{.Id}}", spec.Tag)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	imageID := strings.TrimSpace(string(id))
+	if imageID == "" {
+		return BuildResult{}, result.NewFailure(result.CodeImageUnavailable, "engine.build",
+			"the engine built %s but reported no image identifier", spec.Tag)
+	}
+	return BuildResult{ImageID: imageID}, nil
 }
 
 // Create implements Engine. Every flag here is fixed policy; the spec cannot

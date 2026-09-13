@@ -1,0 +1,50 @@
+# wlvision image manifest — example.
+#
+# A manifest describes one derived session image. It records a digest-pinned
+# base, an optional package transaction, the files copied out of this
+# directory, and the application the session runs. wlvision builds it once,
+# then starts sessions from the resulting image.
+#
+# The schema is wlvision-manifest/v1. Unknown keys are refused, never ignored:
+# there is deliberately no runtime-network key, because a session never gets
+# networking. The only network switch is base.allow_network, and it applies to
+# the build alone.
+
+schema = "wlvision-manifest/v1"
+
+[base]
+# Required. The base must be digest-pinned: a tag moves, and a session records
+# the bytes it actually ran. Replace the digest below with the one you pinned.
+image = "docker.io/library/archlinux@sha256:6d9b8f3c2a1e4f5d7c8b9a0e1f2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5"
+# Optional. Installed in one transaction before any source is copied.
+packages = ["gtk4", "sqlite"]
+# Optional, default false. Build-time only: the session never inherits it.
+allow_network = true
+
+[application]
+# Required. The first element must be an absolute path.
+command = ["/app/example", "--flag"]
+# Optional. The image's working directory.
+workdir = "/app"
+# Optional. KEY=VALUE entries with a non-empty key.
+env = ["KEY=value"]
+# Optional. Absolute paths the application may write at runtime. wlvision owns
+# /run, and a copy target may not live inside a writable path.
+writable = ["/tmp", "/home/agent"]
+
+[copy]
+# Optional. Files or directory trees copied into the image. `from` is relative
+# to this manifest's directory and may not escape it, directly or through a
+# symbolic link; `to` is absolute, must be unique, and may not sit inside a
+# declared writable path. Point `from` at the binary or configuration your
+# application needs — here, the module file keeps this example loadable in a
+# plain checkout.
+sources = [
+  { from = "go.mod", to = "/app/go.mod", mode = "0644" },
+]
+
+# Optional. Sibling Go modules copied into the build context for local
+# dependency iteration; they are never bind-mounted into a session. A module
+# must resolve next to the repository root, as ../wlturbo does. Left commented
+# out so this example loads in a checkout without sibling repositories.
+# modules = ["../wlturbo"]
