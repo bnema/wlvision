@@ -87,6 +87,30 @@ them in its details:
 | `committed_width`, `committed_height` | the content size the application committed |
 | `visible_width`, `visible_height` | the toplevel geometry the module reports |
 
+## Image builds
+
+| Command | Flags | Result |
+| --- | --- | --- |
+| `image build` | `--manifest`, `--tag`, `--staging` | the manifest, the tag created, the image identifier, and the build transcript |
+
+`image build` turns a manifest into a session image. The manifest declares a
+digest-pinned base — a reference that carries `@sha256:`, or a plain reference
+plus `base.digest` naming the exact image id the engine must report for it — its
+packages, the files to copy, and the application's environment, working
+directory, writable paths, and command. Copied files are resolved against the
+manifest's own directory.
+
+```bash
+wlvision --json image build --manifest wlvision.toml --tag my-app:local
+wlvision --json --image my-app:local session create --session <session> --wait
+```
+
+The build uses the network only when `base.allow_network` is true; the session it
+produces never has one. `--staging` names the directory to assemble the build
+context in; without it wlvision uses a temporary directory, removes it after a
+successful build, and keeps it and names it in the failure's `details.staging`
+when the build fails.
+
 ## Session lifecycle
 
 | Command | Flags | Result |

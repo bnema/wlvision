@@ -1,0 +1,24 @@
+schema = "wlvision-manifest/v1"
+
+# A browser is the heaviest realistic client a session can run: it needs a
+# large dependency tree, many memory mappings, its own sandbox and a software
+# renderer, which is exactly what makes it worth running here.
+[base]
+image = "wlvision-session:local"
+digest = "sha256:REPLACE_WITH_SESSION_IMAGE_ID"
+packages = ["firefox"]
+allow_network = true
+
+[application]
+command = ["/usr/bin/firefox", "--version"]
+env = [
+  "GDK_BACKEND=wayland",
+  "MOZ_ENABLE_WAYLAND=1",
+  "MOZ_DISABLE_CONTENT_SANDBOX=1",
+  "LIBGL_ALWAYS_SOFTWARE=1",
+]
+
+[copy]
+sources = [
+  { from = "page", to = "/opt/wlvision-page", mode = "0644" },
+]

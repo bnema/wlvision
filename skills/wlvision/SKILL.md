@@ -83,6 +83,22 @@ Do not use wlvision when:
 11. Close when done: `session close`, or pass `--ephemeral` to `run`. Never leave
     a session behind on success.
 
+## When the image lacks a dependency
+
+A session image carries the runtime a session has. If the application needs a
+package the image does not have, build a derived image from a manifest and use
+that image for the session:
+
+```bash
+wlvision --json image build --manifest wlvision.toml --tag my-app:local
+wlvision --json --image my-app:local session create --session <session> --wait
+```
+
+The build may reach the network when the manifest allows it; the session that
+runs from the result never has one. A manifest names a digest-pinned base (or an
+image the engine already holds, pinned by the id it must report), its packages,
+the files to copy, and the application's environment and command.
+
 ## Happy path
 
 ```bash

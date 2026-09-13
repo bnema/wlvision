@@ -139,6 +139,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	switch remaining[0] {
 	case "doctor":
 		return command.doctor(remaining[1:])
+	case "image":
+		return command.imageCommand(remaining[1:])
 	case "session":
 		return command.session(remaining[1:])
 	case "run":
@@ -775,6 +777,7 @@ Global options (before the command):
 
 Commands:
   doctor
+  image build --manifest FILE [--tag NAME] [--staging DIR]
   session create --session ID [--memory BYTES] [--pids N] [--file-size BYTES] [--open-files N] [--retention DURATION] [--wait]
   session list
   session inspect --session ID

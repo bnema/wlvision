@@ -128,6 +128,8 @@ func loadCLI(t *testing.T, dir string) *cliModel {
 	if top == nil {
 		t.Fatal("cmd/wlvision: the run dispatch switch was not found")
 	}
+	type group struct{ name, method string }
+	var groups []group
 	for _, clause := range switchCases(top) {
 		name := caseString(clause)
 		if name == "" {
@@ -138,19 +140,26 @@ func loadCLI(t *testing.T, dir string) *cliModel {
 			t.Fatalf("cmd/wlvision: command %q has no dispatch call", name)
 		}
 		model.commands[name] = flagsOf(t, methods[method], method)
+		groups = append(groups, group{name: name, method: method})
 	}
 
-	if sessionSwitch := findSwitchOnIndex(methods["session"]); sessionSwitch != nil {
-		for _, clause := range switchCases(sessionSwitch) {
+	// A command may be a group: it dispatches on its first argument, the way
+	// "session create" and "image build" do.
+	for _, parent := range groups {
+		subSwitch := findSwitchOnIndex(methods[parent.method])
+		if subSwitch == nil {
+			continue
+		}
+		for _, clause := range switchCases(subSwitch) {
 			name := caseString(clause)
 			if name == "" {
 				continue
 			}
 			method := firstMethodCall(clause.Body, cliMethods)
 			if method == "" {
-				t.Fatalf("cmd/wlvision: session subcommand %q has no dispatch call", name)
+				t.Fatalf("cmd/wlvision: %s subcommand %q has no dispatch call", parent.name, name)
 			}
-			model.commands["session "+name] = flagsOf(t, methods[method], method)
+			model.commands[parent.name+" "+name] = flagsOf(t, methods[method], method)
 		}
 	}
 	return model
@@ -438,6 +447,11 @@ func checkCommand(t *testing.T, model *cliModel, command docCommand) (string, in
 
 	index := 1
 	for index < len(tokens) {
+		// A global flag is written with a dash: a bare word that happens to
+		// share a flag's name is the command, not the flag.
+		if !strings.HasPrefix(tokens[index], "-") {
+			break
+		}
 		name, hasValue := flagToken(tokens[index])
 		takesValue, ok := model.globals[name]
 		if !ok {
@@ -455,13 +469,17 @@ func checkCommand(t *testing.T, model *cliModel, command docCommand) (string, in
 
 	key := tokens[index]
 	index++
-	if key == "session" {
-		if index >= len(tokens) {
-			fail("session names no subcommand")
-			return "", 0
+	// A command may be a group: "session create", "image build". Join the next
+	// token whenever that pair is a known command, so a group is read whole.
+	if index < len(tokens) {
+		if _, joined := model.commands[key+" "+tokens[index]]; joined {
+			key += " " + tokens[index]
+			index++
 		}
-		key += " " + tokens[index]
-		index++
+	}
+	if _, ok := model.commands[key]; !ok && key == "session" {
+		fail("session names no subcommand")
+		return "", 0
 	}
 	info, ok := model.commands[key]
 	if !ok {

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>wlvision-browser</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { background: #101418; color: #e8e8e8; font: 20px/1.5 sans-serif; padding: 40px; }
+  h1 { font-size: 32px; margin: 0 0 24px; }
+  input { font: 24px sans-serif; padding: 10px; width: 480px; }
+  #out { margin-top: 32px; font-size: 28px; color: #7fd1ff; }
+</style>
+</head>
+<body>
+<h1 id="prompt">Type in the field and press Enter</h1>
+<input id="field" autofocus autocomplete="off" spellcheck="false">
+<div id="out">&nbsp;</div>
+<script>
+  const field = document.getElementById('field');
+  const out = document.getElementById('out');
+  function submit() {
+    const value = field.value;
+    document.title = 'typed:' + value;
+    out.textContent = 'wlvision typed: ' + value;
+  }
+  field.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') { submit(); }
+  });
+  document.addEventListener('click', function () { field.focus(); });
+</script>
+</body>
+</html>

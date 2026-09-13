@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -615,5 +617,82 @@ func TestNewServiceRefusesAnUnknownEngine(t *testing.T) {
 	var failure *result.Failure
 	if !errors.As(err, &failure) || failure.Code != result.CodeUsageError {
 		t.Fatalf("error = %v, want a usage_error failure", err)
+	}
+}
+
+// imageManifest writes a manifest whose base carries its own digest, so the
+// build path involves no image lookup.
+func imageManifest(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wlvision.toml")
+	body := `schema = "wlvision-manifest/v1"
+
+[base]
+image = "example.invalid/runtime@sha256:` + strings.Repeat("ab", 32) + `"
+packages = ["example-package"]
+allow_network = true
+
+[application]
+command = ["/app/example"]
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write the manifest: %v", err)
+	}
+	return path
+}
+
+func TestImageBuildTurnsAManifestIntoAnImage(t *testing.T) {
+	fake := enginetest.New()
+	fake.BuildValue = engine.BuildResult{ImageID: "sha256:" + strings.Repeat("cd", 32)}
+	fake.BuildOutput = "==> installing example-package\n"
+	h := newHarness(t, fake)
+
+	code, stdout, stderr := h.run(t, "--json", "image", "build", "--manifest", imageManifest(t))
+	if code != 0 {
+		t.Fatalf("image build exited %d: %s%s", code, stdout, stderr)
+	}
+	envelope := decodeEnvelope(t, stdout)
+	if !envelope.Ok || envelope.Operation != "image.build" {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+	var result struct {
+		Manifest string `json:"manifest"`
+		Tag      string `json:"tag"`
+		ImageID  string `json:"image_id"`
+		Output   string `json:"output"`
+	}
+	if err := json.Unmarshal(envelope.Result, &result); err != nil {
+		t.Fatalf("result is unreadable: %v", err)
+	}
+	if result.Tag == "" || result.ImageID == "" {
+		t.Errorf("result = %+v, want a tag and an image identifier", result)
+	}
+	if !strings.Contains(result.Output, "installing example-package") {
+		t.Errorf("the build transcript is missing: %q", result.Output)
+	}
+	if calls := fake.CountCalls("build "); calls != 1 {
+		t.Errorf("the engine built %d times, want once", calls)
+	}
+}
+
+func TestImageBuildRefusesAnUnknownSubcommandAndAMissingManifest(t *testing.T) {
+	h := newHarness(t, enginetest.New())
+
+	code, stdout, _ := h.run(t, "--json", "image", "push", "--manifest", "x.toml")
+	if code != 2 {
+		t.Errorf("an unknown image subcommand exited %d, want 2", code)
+	}
+	if envelope := decodeEnvelope(t, stdout); envelope.Error == nil || envelope.Error.Code != "usage_error" {
+		t.Errorf("envelope = %+v, want a usage error", envelope)
+	}
+
+	code, stdout, _ = h.run(t, "--json", "image", "build")
+	if code != 2 {
+		t.Errorf("a build without a manifest exited %d, want 2", code)
+	}
+	if envelope := decodeEnvelope(t, stdout); envelope.Error == nil || envelope.Error.Code != "usage_error" {
+		t.Errorf("envelope = %+v, want a usage error", envelope)
 	}
 }
