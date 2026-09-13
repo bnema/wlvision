@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -365,18 +366,40 @@ func TestBuildRefusesAnEngineHeldBaseTheEngineLacks(t *testing.T) {
 	planned := loadAndPlan(t, writeManifest(t, dir, localBaseBody()))
 
 	fake := enginetest.New()
-	fake.ImageIDErr = errors.New("engine: no such image")
+	fake.ImageIDErr = fmt.Errorf("%w: %s", engine.ErrNotFound, localImageID)
 
 	_, err := Build(context.Background(), fake, planned, t.TempDir())
 	if err == nil {
 		t.Fatal("a missing base image was accepted")
 	}
-	failure := failureOf(t, err)
-	if failure.Code != result.CodeImageUnavailable {
-		t.Errorf("code = %s, want %s", failure.Code, result.CodeImageUnavailable)
+	// The lookup failure keeps its own identity: a base the engine does not
+	// hold is a missing image, not a broken engine, and a caller must be able
+	// to tell them apart.
+	if !errors.Is(err, engine.ErrNotFound) {
+		t.Errorf("error = %v, want it to wrap %v", err, engine.ErrNotFound)
 	}
 	if fake.CountCalls("build ") != 0 {
 		t.Errorf("call log = %v, want no build for a missing base", fake.CallLog())
+	}
+}
+
+// A base reference that could be read as an engine flag is refused while the
+// manifest is loaded, not when an engine happens to see it.
+func TestLoadRefusesAFlagLikeBaseReference(t *testing.T) {
+	dir := project(t)
+	body := strings.Replace(localBaseBody(),
+		`image = "wlvision-runtime:local"`, `image = "--privileged"`, 1)
+	if body == localBaseBody() {
+		t.Fatal("the test did not replace the base reference")
+	}
+	manifest := writeManifest(t, dir, body)
+
+	_, err := Load(manifest)
+	if err == nil {
+		t.Fatal("a flag-like base reference was accepted")
+	}
+	if failure := failureOf(t, err); failure.Code != result.CodeUsageError {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeUsageError)
 	}
 }
 

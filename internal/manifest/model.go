@@ -220,6 +220,10 @@ func (b Base) validate() error {
 		}
 	case b.Image == "":
 		return usage("base.image", "an image reference is required")
+	case strings.HasPrefix(b.Image, "-"):
+		// A reference that could be read as a flag is refused here rather than
+		// by whichever engine happens to see it first.
+		return usage("base.image", "%q must not begin with a dash", b.Image)
 	case b.Digest == "":
 		return usage("base.image",
 			"%q carries neither its own @sha256: digest nor a base.digest; a digest (or a verified local image id) is required",

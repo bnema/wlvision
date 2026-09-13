@@ -263,8 +263,11 @@ func Build(ctx context.Context, containerEngine engine.Engine, plan BuildPlan, s
 	if plan.Digest != "" {
 		imageID, err := containerEngine.ImageID(ctx, plan.Image)
 		if err != nil {
-			return Result{}, result.NewFailure(result.CodeImageUnavailable, "manifest.build",
-				"the base image %q is not available in the engine: %v", plan.Image, err)
+			// The lookup failed for a reason that belongs to the engine or to
+			// the reference itself; wrapping keeps that identity (a missing
+			// image stays ErrNotFound, a malformed reference stays a usage
+			// error) instead of relabelling it as an unavailable image.
+			return Result{}, fmt.Errorf("manifest.build: cannot pin the base image %q: %w", plan.Image, err)
 		}
 		imageID = strings.TrimSpace(imageID)
 		if imageID != plan.Digest {
@@ -459,7 +462,7 @@ func copyFile(ctx context.Context, source, target string, mode os.FileMode) erro
 	if err != nil {
 		return fmt.Errorf("manifest: cannot read %s: %w", source, err)
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }()
 
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("manifest: cannot create %s: %w", filepath.Dir(target), err)

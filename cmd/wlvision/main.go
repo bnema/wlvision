@@ -83,8 +83,8 @@ type globalFlags struct {
 	stateRoot string
 	image     string
 	context   string
-	// engine selects the container engine adapter. Docker stays the default;
-	// podman is asked for explicitly, or selected through the configuration.
+	// engine selects the container engine adapter. Docker stays the default and
+	// podman is asked for explicitly with --engine.
 	engine string
 }
 
