@@ -25,6 +25,9 @@ compatible compositor; standalone consumer fixture compiles and runs.
 
 ## Accepted commits
 
+These are the revisions every measurement below was taken against. They are not
+published as tags; wlvision consumes them through the local replacements.
+
 | Repository | Revision | Branch | State |
 | --- | --- | --- | --- |
 | WLTurbo | `a3a494e518efc605059f17179dea07edb1132a84` (transport `ca248e6`) | `phase1/operational-health` | verified below |
@@ -146,15 +149,24 @@ The reversible loop was verified byte-identical for both module files:
 `scripts/check-local-deps.sh` requires exactly the expected replacements and
 rejects any other, using `internal/tools/checkreplace`, without `jq`.
 
-## Release preparation (Phase 2, not yet published)
+## Release status
+
+Publication is deferred by decision. Development continues on local filesystem
+replacements: `scripts/use-local-deps.sh` applies them, they stay uncommitted,
+and `scripts/clear-local-deps.sh` reverts them. The committed module files keep
+the last published requirements, so the module graph is always release-clean and
+the replacement state is explicit in `git status`.
+
+Still to be discovered bugs in either dependency are expected, which is why
+tagging now would pin a moving target.
+
+When cutting releases becomes useful, these are the prepared tags and the module
+changes that follow them:
 
 | Repository | Proposed tag | Commit to tag | Notes |
 | --- | --- | --- | --- |
 | WLTurbo | `v0.1.1` | `a3a494e518efc605059f17179dea07edb1132a84` | framing, descriptor ownership, lifecycle, formatting |
 | LibWL Devices | `v0.2.1` | `bc59c334a2a28d4a20e761af240be3a401699413` | testability, generator, defect fixes, inhibitor client; must require WLTurbo `v0.1.1` |
-
-Proposed module changes once the tags exist (prepared in temporary copies, not
-yet resolvable):
 
 ```text
 libwldevices-go: require github.com/bnema/wlturbo v0.1.1
@@ -162,6 +174,5 @@ wlvision:        require github.com/bnema/wlturbo v0.1.1
                  require github.com/bnema/libwldevices-go v0.2.1
 ```
 
-Publication, signing and push require the Phase 1 review to approve this
-document first. Once published, wlvision replaces its local replacements with
-the published revisions and re-runs the same gates from a clean checkout.
+The tags above name the commits verified in this document; a release cut later
+must re-run the same gates from a clean checkout before it is pushed.
