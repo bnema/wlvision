@@ -719,3 +719,47 @@ func TestServiceRunRefusesASessionThatCannotRun(t *testing.T) {
 		t.Error("an application was started in a session that cannot run one")
 	}
 }
+
+// An application exec'd into a session has no home unless one is named, and a
+// browser or a toolkit refuses to start without it.
+func TestServiceRunGivesTheApplicationAHome(t *testing.T) {
+	fake := enginetest.New()
+	store := newTestStore(t)
+	service := newTestService(t, fake, store)
+
+	created, err := service.Create(context.Background(), CreateRequest{Session: "demo"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := fake.Start(context.Background(), created.ContainerID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	record, err := store.Load("demo")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	record.State = StateReady
+	if err := store.Save(record); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var executed engine.ExecSpec
+	fake.ExecFunc = func(spec engine.ExecSpec) (engine.ExecResult, error) {
+		executed = spec
+		return engine.ExecResult{}, nil
+	}
+	if _, err := service.Run(context.Background(), RunRequest{Session: "demo", Argv: []string{"/app/example"}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := map[string]string{
+		EnvRuntimeDir:     WaylandDir,
+		EnvWaylandDisplay: WaylandDisplay,
+		EnvHome:           ApplicationHome,
+	}
+	for name, value := range want {
+		if !containsString(executed.Env, name+"="+value) {
+			t.Errorf("the application environment is missing %s=%s: %v", name, value, executed.Env)
+		}
+	}
+}

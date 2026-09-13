@@ -742,6 +742,9 @@ func applicationEnv() []string {
 	return []string{
 		EnvRuntimeDir + "=" + WaylandDir,
 		EnvWaylandDisplay + "=" + WaylandDisplay,
+		// An application that was exec'd into the session has no home unless one
+		// is named, and most toolkits and browsers refuse to start without one.
+		EnvHome + "=" + ApplicationHome,
 	}
 }
 

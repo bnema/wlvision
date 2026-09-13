@@ -85,6 +85,11 @@ keymap_options=
 const (
 	EnvRuntimeDir     = "XDG_RUNTIME_DIR"
 	EnvWaylandDisplay = "WAYLAND_DISPLAY"
+	EnvHome           = "HOME"
+	// ApplicationHome is the home directory of the application identity. It is a
+	// bounded tmpfs the engine provides: an application that writes a profile or
+	// a cache needs a home, and it must be one that disappears with the session.
+	ApplicationHome = "/home/agent"
 )
 
 // ContainerStatus is what the supervisor reports about the session's own
