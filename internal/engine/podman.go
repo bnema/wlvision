@@ -25,6 +25,12 @@ var _ Engine = (*Podman)(nil)
 // context is never empty.
 const podmanLocalName = "local"
 
+// podmanBuildNetwork is Podman's word for a build with outbound networking. It
+// is deliberately not Docker's "default": `podman build` reads an unrecognised
+// mode as a network name, and a rootless engine cannot join a named network,
+// so a network-enabled build must ask for Podman's own private mode.
+const podmanBuildNetwork = "private"
+
 // Podman drives a Podman CLI. Like the Docker adapter it shells out to the
 // engine's own command line, so the user's rootless configuration, socket, and
 // credentials keep working unchanged. It builds the same argument vectors from
@@ -124,7 +130,7 @@ func (p *Podman) Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 
 	network := "none"
 	if spec.Network {
-		network = "default"
+		network = podmanBuildNetwork
 	}
 
 	stderr, merged := captureStderr(spec.Stderr)
@@ -197,20 +203,14 @@ func (p *Podman) Create(ctx context.Context, spec CreateSpec) (string, error) {
 	return id, nil
 }
 
-// Start implements Engine. As in Docker, an already-running container is the
-// desired state, so a retried start converges instead of failing.
+// Start implements Engine. Podman converges by itself: starting a container
+// that is already running exits 0, so there is no wording to special-case.
 func (p *Podman) Start(ctx context.Context, id string) error {
 	if id == "" {
 		return usageFailure("engine.start", "a container identifier is required")
 	}
 
-	stderr, err := p.run(ctx, "engine.start", Command{Args: p.args("start", id)})
-	if err == nil {
-		return nil
-	}
-	if strings.Contains(stderr.String(), "is already running") {
-		return nil
-	}
+	_, err := p.run(ctx, "engine.start", Command{Args: p.args("start", id)})
 	return err
 }
 

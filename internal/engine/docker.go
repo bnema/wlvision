@@ -21,6 +21,11 @@ import (
 // of the bound is that the failure stays readable in a JSON envelope.
 const maxStderrDetails = 4096
 
+// dockerBuildNetwork is Docker's word for "the default bridge network". The
+// network-enabled build mode is engine-specific: Podman does not accept this
+// value, so each adapter states its own.
+const dockerBuildNetwork = "default"
+
 // Options configures a container engine adapter. Context names the CLI
 // context (Docker) or connection (Podman) the adapter talks to; empty means
 // the engine CLI's own current endpoint, which the adapter records in the
@@ -125,7 +130,7 @@ func (d *Docker) Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 
 	network := "none"
 	if spec.Network {
-		network = "default"
+		network = dockerBuildNetwork
 	}
 
 	stderr, merged := captureStderr(spec.Stderr)
@@ -151,7 +156,7 @@ func (d *Docker) Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	imageID := strings.TrimSpace(string(id))
+	imageID := canonicalImageID(string(id))
 	if imageID == "" {
 		return BuildResult{}, result.NewFailure(result.CodeImageUnavailable, "engine.build",
 			"the engine built %s but reported no image identifier", spec.Tag)
@@ -172,7 +177,7 @@ func (d *Docker) ImageID(ctx context.Context, reference string) (string, error) 
 	if err != nil {
 		return "", missingContainer(err, reference)
 	}
-	imageID := strings.TrimSpace(string(out))
+	imageID := canonicalImageID(string(out))
 	if imageID == "" {
 		return "", result.NewFailure(result.CodeImageUnavailable, "engine.image_id",
 			"the engine holds %q but reported no image identifier", reference)
@@ -428,12 +433,13 @@ func captureStderr(caller io.Writer) (*boundedBuffer, io.Writer) {
 	return stderr, io.MultiWriter(caller, stderr)
 }
 
-// missingContainer reports the CLI's answer for a container that no longer
-// exists. Unlike the engine API, the CLI has no structured reason, so its text
-// is the only signal available; anything else is a real failure. Docker and
-// Podman word the condition differently ("no such object", "no such image",
-// "no such container", "no container with name or ID ... found") and all of
-// them map to the same ErrNotFound.
+// missingContainer reports the CLI's answer for a container or image the
+// engine no longer holds. Unlike the engine API, the CLI has no structured
+// reason, so its text is the only signal available; anything else is a real
+// failure. Docker and Podman word the condition differently ("no such
+// object", "no such container", "no such image", "no container with name or
+// ID ... found", and Podman's storage errors "image not known" / "container
+// not known") and all of them map to the same ErrNotFound.
 func missingContainer(err error, id string) error {
 	var failure *result.Failure
 	if !errors.As(err, &failure) || failure.Code != result.CodeEngineUnavailable {
@@ -444,7 +450,9 @@ func missingContainer(err error, id string) error {
 	if strings.Contains(stderr, "no such object") ||
 		strings.Contains(stderr, "no such container") ||
 		strings.Contains(stderr, "no such image") ||
-		strings.Contains(stderr, "no container with name or id") {
+		strings.Contains(stderr, "no container with name or id") ||
+		strings.Contains(stderr, "image not known") ||
+		strings.Contains(stderr, "container not known") {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	return err

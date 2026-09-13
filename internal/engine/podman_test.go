@@ -318,6 +318,34 @@ func TestPodmanBuildConstructsTheCommandAndNormalizesTheImageID(t *testing.T) {
 	}
 }
 
+func TestPodmanBuildUsesPodmansOwnNetworkMode(t *testing.T) {
+	eng, runner := podmanWith(t,
+		reply{contains: []string{"build"}},
+		reply{contains: []string{"image", "inspect"}, stdout: "c0ffee\n"},
+	)
+
+	if _, err := eng.Build(context.Background(), BuildSpec{
+		Context:       "/tmp/wlvision-build",
+		Containerfile: "Containerfile",
+		Tag:           "wlvision-build:abc123",
+		Network:       true,
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	got := runner.calls[0].Args
+	if !containsAll(got, []string{"--network=private"}) {
+		t.Errorf("build command = %v, want Podman's own network mode", got)
+	}
+	// Podman reads an unknown mode as a network name, and a rootless engine
+	// cannot join a named network, so Docker's word must never be used here.
+	for _, forbidden := range []string{"--network=default", "--network=none"} {
+		if containsAll(got, []string{forbidden}) {
+			t.Errorf("build command = %v contains %q", got, forbidden)
+		}
+	}
+}
+
 func TestPodmanImageIDNormalizesTheImageIdentifier(t *testing.T) {
 	eng, runner := podmanWith(t, reply{contains: []string{"image", "inspect"}, stdout: "c0ffee\n"})
 
@@ -338,8 +366,10 @@ func TestPodmanImageIDNormalizesTheImageIdentifier(t *testing.T) {
 func TestPodmanImageIDReportsAnImageTheEngineDoesNotHold(t *testing.T) {
 	eng, _ := podmanWith(t, reply{
 		contains: []string{"image", "inspect"},
-		stderr:   "Error: no such image: wlvision-runtime:test",
-		err:      &exec.ExitError{},
+		// The engine's own storage wording, not the Docker API's the adapter
+		// started from.
+		stderr: "Error: wlvision-runtime:test: image not known",
+		err:    &exec.ExitError{},
 	})
 
 	_, err := eng.ImageID(context.Background(), "wlvision-runtime:test")
@@ -405,15 +435,33 @@ func TestPodmanReportsAContainerTheEngineNoLongerHas(t *testing.T) {
 	})
 }
 
-func TestPodmanStartTreatsAnAlreadyRunningContainerAsSuccess(t *testing.T) {
-	eng, _ := podmanWith(t, reply{
-		contains: []string{"start"},
-		stderr:   "Error: container c0ffee is already running",
-		err:      &exec.ExitError{},
-	})
+func TestPodmanStartConvergesWhenTheContainerAlreadyRuns(t *testing.T) {
+	// Podman's start on a running container exits 0: convergence is the
+	// engine's answer, not a message the adapter has to interpret.
+	eng, runner := podmanWith(t, reply{contains: []string{"start"}, stdout: "c0ffee\n"})
 
 	if err := eng.Start(context.Background(), "c0ffee"); err != nil {
 		t.Fatalf("Start on a running container: %v", err)
+	}
+	want := []string{"--connection", "wlvision-test", "start", "c0ffee"}
+	if got := runner.lastCall(t).Args; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("start command = %v, want %v", got, want)
+	}
+}
+
+func TestPodmanStartStillReportsAFailure(t *testing.T) {
+	eng, _ := podmanWith(t, reply{
+		contains: []string{"start"},
+		stderr:   "Error: no container with name or ID \"c0ffee\" found: no such container",
+		err:      &exec.ExitError{},
+	})
+
+	err := eng.Start(context.Background(), "c0ffee")
+	if err == nil {
+		t.Fatal("a start failure was reported as success")
+	}
+	if failure := failureOf(t, err); failure.Code != result.CodeEngineUnavailable {
+		t.Errorf("code = %s, want %s", failure.Code, result.CodeEngineUnavailable)
 	}
 }
 
@@ -433,6 +481,41 @@ func TestPodmanExecReportsTheApplicationExitCode(t *testing.T) {
 	}
 	if execution.ExitCode != 3 {
 		t.Errorf("ExitCode = %d, want 3", execution.ExitCode)
+	}
+}
+
+func TestPodmanMapsTheStorageNotFoundWording(t *testing.T) {
+	// containers/storage words a lost object as "not known", not as the
+	// Docker API's "no such object".
+	tests := []struct {
+		name    string
+		command string
+		call    func(eng *Podman) error
+	}{
+		{
+			name:    "remove",
+			command: "rm",
+			call:    func(eng *Podman) error { return eng.Remove(context.Background(), "c0ffee") },
+		},
+		{
+			name:    "stop",
+			command: "stop",
+			call:    func(eng *Podman) error { return eng.Stop(context.Background(), "c0ffee", time.Second) },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			eng, _ := podmanWith(t, reply{
+				contains: []string{test.command},
+				stderr:   "Error: c0ffee: container not known",
+				err:      &exec.ExitError{},
+			})
+
+			if err := test.call(eng); !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s error = %v, want ErrNotFound", test.name, err)
+			}
+		})
 	}
 }
 

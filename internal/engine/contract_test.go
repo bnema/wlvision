@@ -3,10 +3,12 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -52,7 +54,16 @@ type contractAdapter struct {
 	// buildImageID is what `image inspect` answers for a built image; Podman
 	// reports it without the algorithm prefix, which the adapter normalizes.
 	buildImageID string
-	newAdapter   func(runner CommandRunner, options Options) (Engine, error)
+	// buildNetwork is the engine's own word for a network-enabled build.
+	// Podman rejects Docker's "default", so it must be stated per adapter.
+	buildNetwork string
+	// missingImageText is how the engine's CLI words a reference it does not
+	// hold; the wording is the only signal available, so it is pinned here.
+	missingImageText string
+	// alreadyRunning is the engine's answer to starting a running container:
+	// Docker reports an error, Podman exits successfully.
+	alreadyRunning []reply
+	newAdapter     func(runner CommandRunner, options Options) (Engine, error)
 }
 
 func contractAdapters() []contractAdapter {
@@ -68,7 +79,14 @@ func contractAdapters() []contractAdapter {
 			degradedFixture:  infoRootlessCgroupV1WithoutDelegation,
 			noSeccompFixture: infoWithoutSeccomp,
 			buildImageID:     "sha256:c0ffee\n",
-			newAdapter:       func(runner CommandRunner, options Options) (Engine, error) { return NewDocker(runner, options) },
+			buildNetwork:     "default",
+			missingImageText: "Error: No such image: wlvision-runtime:contract",
+			alreadyRunning: []reply{{
+				contains: []string{"start"},
+				stderr:   "Error response from daemon: container c0ffee is already running",
+				err:      &exec.ExitError{},
+			}},
+			newAdapter: func(runner CommandRunner, options Options) (Engine, error) { return NewDocker(runner, options) },
 		},
 		{
 			name:             "podman",
@@ -81,7 +99,11 @@ func contractAdapters() []contractAdapter {
 			degradedFixture:  podmanInfoRootlessCgroupV1NoDelegation,
 			noSeccompFixture: podmanInfoWithoutSeccomp,
 			buildImageID:     "c0ffee\n",
-			newAdapter:       func(runner CommandRunner, options Options) (Engine, error) { return NewPodman(runner, options) },
+			buildNetwork:     "private",
+			missingImageText: "Error: wlvision-runtime:contract: image not known",
+			// Podman's start already converges: a running container exits 0.
+			alreadyRunning: []reply{{contains: []string{"start"}}},
+			newAdapter:     func(runner CommandRunner, options Options) (Engine, error) { return NewPodman(runner, options) },
 		},
 	}
 }
@@ -269,12 +291,8 @@ func fakeEngineContract(t *testing.T, adapter contractAdapter) {
 			expect: func(adapter contractAdapter) [][]string { return [][]string{adapter.expect("start", "c0ffee")} },
 		},
 		{
-			name: "start-an-already-running-container",
-			replies: []reply{{
-				contains: []string{"start"},
-				stderr:   "Error response from daemon: container c0ffee is already running",
-				err:      &exec.ExitError{},
-			}},
+			name:    "start-an-already-running-container",
+			replies: adapter.alreadyRunning,
 			run: func(t *testing.T, eng Engine, _ *fakeRunner) {
 				if err := eng.Start(context.Background(), "c0ffee"); err != nil {
 					t.Fatalf("Start on a running container: %v", err)
@@ -446,6 +464,22 @@ func fakeEngineContract(t *testing.T, adapter contractAdapter) {
 			},
 		},
 		{
+			name: "an-image-the-engine-does-not-hold",
+			replies: []reply{{
+				contains: []string{"image", "inspect"},
+				stderr:   adapter.missingImageText,
+				err:      &exec.ExitError{},
+			}},
+			run: func(t *testing.T, eng Engine, _ *fakeRunner) {
+				if _, err := eng.ImageID(context.Background(), "wlvision-runtime:contract"); !errors.Is(err, ErrNotFound) {
+					t.Errorf("ImageID error = %v, want ErrNotFound", err)
+				}
+			},
+			expect: func(adapter contractAdapter) [][]string {
+				return [][]string{adapter.expect("image", "inspect", "--format", "{{.Id}}", "wlvision-runtime:contract")}
+			},
+		},
+		{
 			name: "build",
 			replies: []reply{
 				{contains: []string{"build"}, stdout: "build output\n"},
@@ -496,7 +530,7 @@ func fakeEngineContract(t *testing.T, adapter contractAdapter) {
 			},
 			expect: func(adapter contractAdapter) [][]string {
 				return [][]string{
-					adapter.expect("build", "--network=default", "--file", "/tmp/wlvision-build/Containerfile", "--tag", "wlvision-build:abc123", "/tmp/wlvision-build"),
+					adapter.expect("build", "--network="+adapter.buildNetwork, "--file", "/tmp/wlvision-build/Containerfile", "--tag", "wlvision-build:abc123", "/tmp/wlvision-build"),
 					adapter.expect("image", "inspect", "--format", "{{.Id}}", "wlvision-build:abc123"),
 				}
 			},
@@ -635,7 +669,7 @@ func liveEngineContract(t *testing.T, adapter contractAdapter) {
 		adapter.name, image, caps.ServerVersion, caps.Context, caps.CgroupVersion, caps.CgroupDriver,
 		caps.MemoryLimit, caps.PidsLimit, caps.Degradations())
 
-	liveLifecycle(t, eng, image)
+	liveLifecycle(t, adapter, eng, image, caps)
 }
 
 // liveImages caches the image a live contract found usable, keyed by engine, so
@@ -731,7 +765,7 @@ func liveImageRunsShell(t *testing.T, eng Engine, image string) bool {
 
 // liveLifecycle runs one session's operations end to end: the state a session
 // actually traverses, with each identity, and the cleanup that must follow.
-func liveLifecycle(t *testing.T, eng Engine, image string) {
+func liveLifecycle(t *testing.T, adapter contractAdapter, eng Engine, image string, caps Capabilities) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -757,6 +791,10 @@ func liveLifecycle(t *testing.T, eng Engine, image string) {
 			t.Errorf("live cleanup of %s failed: %v", id, err)
 		}
 	})
+
+	// The vector the adapter built must have become the engine's real policy,
+	// not merely have been printed on a command line.
+	assertLivePolicy(t, adapter, liveInspectPolicy(t, adapter.binary, id), caps)
 
 	if state, err := eng.State(ctx, id); err != nil {
 		t.Fatalf("live State on the created container: %v", err)
@@ -864,4 +902,185 @@ func waitForCondition(t *testing.T, what string, condition func() bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// livePolicy is the slice of `inspect` that decides whether a created
+// container really carries the session isolation policy. Both engines report
+// it in the Docker-compatible Config/HostConfig shape.
+type livePolicy struct {
+	Config struct {
+		User string   `json:"User"`
+		Env  []string `json:"Env"`
+	} `json:"Config"`
+	HostConfig struct {
+		NetworkMode    string            `json:"NetworkMode"`
+		ReadonlyRootfs bool              `json:"ReadonlyRootfs"`
+		Privileged     bool              `json:"Privileged"`
+		CapDrop        []string          `json:"CapDrop"`
+		SecurityOpt    []string          `json:"SecurityOpt"`
+		Binds          []string          `json:"Binds"`
+		Tmpfs          map[string]string `json:"Tmpfs"`
+		Memory         int64             `json:"Memory"`
+		PidsLimit      *int64            `json:"PidsLimit"`
+		Ulimits        []struct {
+			Name string `json:"Name"`
+			Soft int64  `json:"Soft"`
+		} `json:"Ulimits"`
+	} `json:"HostConfig"`
+}
+
+// liveInspectPolicy reads the created container's real configuration, so the
+// live contract asserts the engine's policy rather than the adapter's
+// intentions.
+func liveInspectPolicy(t *testing.T, binary, id string) livePolicy {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var stdout bytes.Buffer
+	if err := (CLIRunner{Binary: binary}).Run(ctx, Command{
+		Args:   []string{"inspect", "--format", "{{json .}}", id},
+		Stdout: &stdout,
+	}); err != nil {
+		t.Fatalf("inspecting the created container %s: %v", id, err)
+	}
+
+	var policy livePolicy
+	if err := json.Unmarshal(stdout.Bytes(), &policy); err != nil {
+		t.Fatalf("reading the created container's policy: %v", err)
+	}
+	return policy
+}
+
+// assertLivePolicy checks the engine's configuration against the isolation
+// vector the adapter claims to have passed: argument parity is not enough if
+// the engine never made the arguments its policy.
+func assertLivePolicy(t *testing.T, adapter contractAdapter, policy livePolicy, caps Capabilities) {
+	t.Helper()
+
+	host := policy.HostConfig
+	if host.NetworkMode != "none" {
+		t.Errorf("%s: NetworkMode = %q, want none", adapter.name, host.NetworkMode)
+	}
+	if !host.ReadonlyRootfs {
+		t.Errorf("%s: ReadonlyRootfs = false, want a read-only root", adapter.name)
+	}
+	if host.Privileged {
+		t.Errorf("%s: Privileged = true", adapter.name)
+	}
+	if !containsFold(host.CapDrop, "ALL") {
+		t.Errorf("%s: CapDrop = %v, want all capabilities dropped", adapter.name, host.CapDrop)
+	}
+	if !containsSubstringFold(host.SecurityOpt, "no-new-privileges") {
+		t.Errorf("%s: SecurityOpt = %v, want no-new-privileges", adapter.name, host.SecurityOpt)
+	}
+	if len(host.Binds) != 0 {
+		t.Errorf("%s: Binds = %v, want no host mounts", adapter.name, host.Binds)
+	}
+
+	if policy.Config.User != "1000:1000" {
+		t.Errorf("%s: Config.User = %q, want the control identity", adapter.name, policy.Config.User)
+	}
+	for _, entry := range []string{"WLVISION_SESSION=contract", "WLVISION_CONTROL_UID=1000", "WLVISION_APPLICATION_UID=1001"} {
+		if !containsFold(policy.Config.Env, entry) {
+			t.Errorf("%s: environment %v is missing %s", adapter.name, policy.Config.Env, entry)
+		}
+	}
+
+	mounts := []struct {
+		path    string
+		options []string
+	}{
+		{path: "/run", options: []string{"rw", "size=67108864", "mode=0755", "exec", "nosuid", "nodev"}},
+		{path: "/tmp", options: []string{"rw", "size=33554432", "mode=01777", "noexec", "nosuid", "nodev"}},
+		{path: "/home/agent", options: []string{"rw", "size=33554432", "mode=01777", "noexec", "nosuid", "nodev"}},
+	}
+	for _, mount := range mounts {
+		reported, ok := host.Tmpfs[mount.path]
+		if !ok {
+			t.Errorf("%s: tmpfs %s is not mounted (Tmpfs = %v)", adapter.name, mount.path, host.Tmpfs)
+			continue
+		}
+		for _, option := range mount.options {
+			if !tmpfsHas(reported, option) {
+				t.Errorf("%s: tmpfs %s = %q, missing %s", adapter.name, mount.path, reported, option)
+			}
+		}
+	}
+
+	// A limit the engine cannot enforce is already reported as a degradation,
+	// so the policy assertion applies exactly where the report claims it.
+	if caps.MemoryLimit && host.Memory != 1<<30 {
+		t.Errorf("%s: HostConfig.Memory = %d, want %d", adapter.name, host.Memory, 1<<30)
+	}
+	if caps.PidsLimit && (host.PidsLimit == nil || *host.PidsLimit != 128) {
+		t.Errorf("%s: HostConfig.PidsLimit = %v, want 128", adapter.name, host.PidsLimit)
+	}
+	for _, limit := range []struct {
+		name string
+		soft int64
+	}{
+		{name: "fsize", soft: 64 << 20},
+		{name: "nofile", soft: 512},
+	} {
+		found := false
+		for _, reported := range host.Ulimits {
+			if reported.Name == limit.name && reported.Soft == limit.soft {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: Ulimits = %+v, missing %s=%d", adapter.name, host.Ulimits, limit.name, limit.soft)
+		}
+	}
+}
+
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSubstringFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(value), strings.ToLower(want)) {
+			return true
+		}
+	}
+	return false
+}
+
+// tmpfsHas compares one tmpfs option, treating mode=0755 and mode=755 as the
+// same declared mode: the engines render the octal digits differently.
+func tmpfsHas(reported, want string) bool {
+	wantKey, wantValue, _ := strings.Cut(want, "=")
+
+	for _, option := range strings.Split(reported, ",") {
+		option = strings.TrimSpace(option)
+		if option == want {
+			return true
+		}
+
+		key, value, ok := strings.Cut(option, "=")
+		if !ok || key != wantKey {
+			continue
+		}
+		if wantKey != "mode" {
+			if value == wantValue {
+				return true
+			}
+			continue
+		}
+
+		reportedMode, reportedErr := strconv.ParseUint(value, 8, 32)
+		wantedMode, wantedErr := strconv.ParseUint(wantValue, 8, 32)
+		if reportedErr == nil && wantedErr == nil && reportedMode == wantedMode {
+			return true
+		}
+	}
+	return false
 }
