@@ -217,23 +217,45 @@ func (s *Server) WaitForRequests(t *testing.T, n int) []Request {
 
 // WaitForRequest blocks until a request for the named interface and opcode has
 // been received, then returns it.
+//
+// The object ID is resolved on every pass: a client writes its bind request
+// without waiting for the server to read it, so the ID may become known only
+// after this call started.
 func (s *Server) WaitForRequest(t *testing.T, iface string, opcode uint16) Request {
 	t.Helper()
 
-	id := s.ObjectID(iface)
-	if id == 0 {
-		t.Fatalf("controltest: interface %q was never bound", iface)
-	}
-
 	deadline := time.Now().Add(waitTimeout)
 	for {
-		for _, req := range s.Requests() {
-			if req.Object == id && req.Opcode == opcode {
-				return req
+		if id := s.ObjectID(iface); id != 0 {
+			for _, req := range s.Requests() {
+				if req.Object == id && req.Opcode == opcode {
+					return req
+				}
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("controltest: no request object=%d opcode=%d for %q: %+v", id, opcode, iface, s.Requests())
+			t.Fatalf("controltest: no request object=%d opcode=%d for %q: %+v", s.ObjectID(iface), opcode, iface, s.Requests())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// WaitForObjectID blocks until the client has bound the named interface and
+// returns the object ID it used.
+//
+// Reading ObjectID once is a race: the client sends the bind request and keeps
+// running, so a test that needs the ID to address a later request or event must
+// wait for it rather than assume the server already read the bind.
+func (s *Server) WaitForObjectID(t *testing.T, iface string) uint32 {
+	t.Helper()
+
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		if id := s.ObjectID(iface); id != 0 {
+			return id
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("controltest: interface %q was never bound", iface)
 		}
 		time.Sleep(time.Millisecond)
 	}

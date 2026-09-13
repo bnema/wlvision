@@ -131,7 +131,9 @@ func (f *fixture) newSource(t *testing.T, kind SourceKind) (*Source, uint32) {
 	t.Cleanup(func() { _ = source.Close() })
 
 	f.creates++
-	manager := f.server.ObjectID(generated.WestonCaptureInterface)
+	// The bind request for the capture global is asynchronous, so wait for the
+	// object ID instead of reading it once and waiting on a zero.
+	manager := f.server.WaitForObjectID(t, generated.WestonCaptureInterface)
 	create := f.nthRequest(t, manager, opCaptureCreate, f.creates)
 	if got := create.Uint32(0); got != f.output.ID() {
 		t.Fatalf("create output = %d, want %d", got, f.output.ID())
