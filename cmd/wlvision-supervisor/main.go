@@ -25,6 +25,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -53,12 +54,12 @@ const (
 	displayGIDEnv      = "WLVISION_DISPLAY_GID"
 )
 
-// Process is one supervised child.
+// Process is one supervised child. Its exit is collected by the session's
+// single reaper, never by the process itself: wait4(-1, ...) must not race
+// with a second waiter.
 type Process interface {
 	// Pid is the process identifier, or 0 when it never started.
 	Pid() int
-	// Wait blocks until the process exits.
-	Wait() error
 	// Signal delivers a signal to the process.
 	Signal(signal os.Signal) error
 	// Kill terminates the process without waiting for it to be polite.
@@ -71,50 +72,73 @@ type Spawner interface {
 	Start(argv []string, env []string, out io.Writer) (Process, error)
 }
 
-// Options describes the session the supervisor runs.
-type Options struct {
-	RuntimeDir string
-	ControlDir string
-	WaylandDir string
-	// PayloadDir receives injected payloads. It defaults to a directory inside
-	// RuntimeDir.
-	PayloadDir string
-	Display    string
-	AgentPath  string
-	Width      int
-	Height     int
-	// ReadyTimeout bounds how long the compositor socket may take to appear.
-	ReadyTimeout time.Duration
-	// StopTimeout bounds how long children may take to stop.
-	StopTimeout time.Duration
-	// DisplayGID, when set, is the group that owns the display socket.
-	DisplayGID int
+// Reaper collects the session's exited children. Exactly one reaper owns them:
+// as PID 1 the supervisor must reap every child, including a process that lost
+// its parent and was reparented to it, and those exits have no other collector.
+type Reaper interface {
+	// Reap blocks until the next child exits and returns its identifier and
+	// exit status, whoever that child is. It reports syscall.ECHILD when no
+	// children remain.
+	Reap() (pid int, status syscall.WaitStatus, err error)
 }
 
-// Supervisor runs one session.
-type Supervisor struct {
-	options Options
-	spawn   Spawner
-	now     func() time.Time
-	log     io.Writer
-
-	weston *child
-	agent  *child
-
-	mu     sync.Mutex
-	ready  bool
-	reason string
+// outputDrainer is implemented by a process whose output is copied from a pipe.
+// Drained reports when the copy loop has ended, so the supervisor can flush the
+// last partial line itself: nothing calls exec.Cmd.Wait any more.
+type outputDrainer interface {
+	Drained() <-chan struct{}
 }
 
-// child is a started process together with its exit channel.
+// exitEvent is one child exit as the reaper reported it.
+type exitEvent struct {
+	pid    int
+	status syscall.WaitStatus
+}
+
+// exitEventBuffer holds exits that arrive before Run consumes them, so the
+// status of a child that exits early is never lost.
+const exitEventBuffer = 16
+
+// child is a started process together with the exit the reaper reported for it.
 type child struct {
 	name    string
 	process Process
 	out     *lineWriter
-	done    chan error
-	// exited is closed when the process is reaped, so a status write can tell a
-	// running child from one that is already gone without consuming its exit.
+	// exited is closed once the supervisor has reaped this child, so a status
+	// write and stopAll can tell a running child from one already gone.
 	exited chan struct{}
+	once   sync.Once
+	status syscall.WaitStatus
+}
+
+// markExited records the child's exit exactly once.
+func (c *child) markExited(status syscall.WaitStatus) {
+	c.once.Do(func() {
+		c.status = status
+		close(c.exited)
+	})
+}
+
+// exitError describes how the child ended.
+func (c *child) exitError() error {
+	return errors.New(describeWaitStatus(c.status))
+}
+
+// describeWaitStatus says how a reaped process ended, because syscall.WaitStatus
+// has no stringer of its own.
+func describeWaitStatus(status syscall.WaitStatus) string {
+	switch {
+	case status.Exited():
+		return fmt.Sprintf("exit status %d", status.ExitStatus())
+	case status.Signaled():
+		return fmt.Sprintf("killed by %s", status.Signal())
+	case status.Stopped():
+		return fmt.Sprintf("stopped by %s", status.StopSignal())
+	case status.Continued():
+		return "continued"
+	default:
+		return fmt.Sprintf("wait status %d", uint32(status))
+	}
 }
 
 // state reports the child's process state as the supervisor last observed it.
@@ -127,7 +151,46 @@ func (c *child) state() string {
 	}
 }
 
-func newSupervisor(options Options, spawn Spawner, log io.Writer, now func() time.Time) *Supervisor {
+// Options describes the session the supervisor runs.
+type Options struct {
+	RuntimeDir string
+	ControlDir string
+	WaylandDir string
+	// PayloadDir receives injected payloads. It defaults to a directory inside
+	// RuntimeDir.
+	PayloadDir string
+	// ExportDir receives captures. It defaults to a directory inside
+	// RuntimeDir.
+	ExportDir string
+	Display   string
+	AgentPath string
+	Width     int
+	Height    int
+	// ReadyTimeout bounds how long the compositor socket may take to appear.
+	ReadyTimeout time.Duration
+	// StopTimeout bounds how long children may take to stop.
+	StopTimeout time.Duration
+	// DisplayGID, when set, is the group that owns the display socket.
+	DisplayGID int
+}
+
+// Supervisor runs one session.
+type Supervisor struct {
+	options Options
+	spawn   Spawner
+	reaper  Reaper
+	now     func() time.Time
+	log     io.Writer
+
+	weston *child
+	agent  *child
+
+	mu     sync.Mutex
+	ready  bool
+	reason string
+}
+
+func newSupervisor(options Options, spawn Spawner, reaper Reaper, log io.Writer, now func() time.Time) *Supervisor {
 	if options.Width <= 0 {
 		options.Width = DefaultWidth
 	}
@@ -155,6 +218,9 @@ func newSupervisor(options Options, spawn Spawner, log io.Writer, now func() tim
 	if options.PayloadDir == "" {
 		options.PayloadDir = filepath.Join(options.RuntimeDir, "payload")
 	}
+	if options.ExportDir == "" {
+		options.ExportDir = filepath.Join(options.RuntimeDir, "export")
+	}
 	if options.Display == "" {
 		options.Display = session.WaylandDisplay
 	}
@@ -162,7 +228,7 @@ func newSupervisor(options Options, spawn Spawner, log io.Writer, now func() tim
 		now = time.Now
 	}
 
-	return &Supervisor{options: options, spawn: spawn, log: log, now: now}
+	return &Supervisor{options: options, spawn: spawn, reaper: reaper, log: log, now: now}
 }
 
 // Run supervises the session until the context is cancelled or one of the
@@ -171,20 +237,28 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	if err := s.prepare(); err != nil {
 		return err
 	}
+
+	// One reaper owns every child of the session, started before the first
+	// child so no exit can be missed. The buffer holds exits that arrive
+	// before Run consumes them.
+	events := make(chan exitEvent, exitEventBuffer)
+	reaped := make(chan struct{})
+	go s.reapLoop(events, reaped)
+
 	if err := s.startCompositor(); err != nil {
 		s.setReason("the compositor did not start")
 		s.writeStatus()
 		return err
 	}
-	if err := s.waitForSocket(ctx); err != nil {
+	if err := s.waitForSocket(ctx, events); err != nil {
 		s.writeStatus()
-		s.stopAll()
+		s.stopAll(events)
 		return err
 	}
 	if err := s.startAgent(); err != nil {
 		s.setReason("the controller did not start")
 		s.writeStatus()
-		s.stopAll()
+		s.stopAll(events)
 		return err
 	}
 	s.writeStatus()
@@ -194,37 +268,93 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	go s.watchReadiness(ctx, watchDone)
 
 	var failure error
-	select {
-	case <-ctx.Done():
-		fmt.Fprintf(s.log, "supervisor: stopping on request\n")
+waiting:
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(s.log, "supervisor: stopping on request\n")
+			break waiting
 
-	case err := <-s.weston.done:
-		failure = fmt.Errorf("the compositor exited: %w", err)
-		s.setReason("the compositor exited")
-		s.writeStatus()
-
-	case err := <-s.agent.done:
-		failure = fmt.Errorf("the controller exited: %w", err)
-		s.setReason("the controller exited")
-		s.writeStatus()
+		case event := <-events:
+			switch exited := s.observe(event); {
+			case exited == nil:
+				// An orphan was collected; the session keeps running. That is
+				// the point of the single reaper.
+				continue
+			case exited == s.weston:
+				failure = fmt.Errorf("the compositor exited: %w", exited.exitError())
+				s.setReason("the compositor exited")
+			case exited == s.agent:
+				failure = fmt.Errorf("the controller exited: %w", exited.exitError())
+				s.setReason("the controller exited")
+			}
+			s.writeStatus()
+			break waiting
+		}
 	}
 
 	close(watchDone)
-	s.stopAll()
+	s.stopAll(events)
 	return failure
 }
 
-// prepare creates the runtime layout. Permissions are the supervisor's
-// business because it is the only writer of the session's own state.
+// reapLoop reaps every child of the session, known or not, until none remain.
+// A pid is delivered once: wait4 consumes an exit status exactly once, so a
+// reaper that repeats a pid must not be mistaken for a second exit.
+func (s *Supervisor) reapLoop(events chan<- exitEvent, reaped chan<- struct{}) {
+	defer close(reaped)
+
+	seen := make(map[int]struct{})
+	for {
+		pid, status, err := s.reaper.Reap()
+		if err != nil {
+			if !errors.Is(err, syscall.ECHILD) {
+				fmt.Fprintf(s.log, "supervisor: cannot reap a child: %v\n", err)
+			}
+			return
+		}
+		if _, duplicate := seen[pid]; duplicate {
+			continue
+		}
+		seen[pid] = struct{}{}
+		events <- exitEvent{pid: pid, status: status}
+	}
+}
+
+// observe records one exit event on the child it belongs to. It reports nil
+// for a pid this supervisor never started: that is a reparented orphan, and
+// collecting it without ending the session is the point of the single reaper.
+func (s *Supervisor) observe(event exitEvent) *child {
+	for _, candidate := range []*child{s.weston, s.agent} {
+		if candidate != nil && candidate.process.Pid() == event.pid {
+			candidate.markExited(event.status)
+			return candidate
+		}
+	}
+	fmt.Fprintf(s.log, "supervisor: reaped orphan pid=%d status=%s\n", event.pid, describeWaitStatus(event.status))
+	return nil
+}
+
+// prepare creates the directories the session owns.
+//
+// The runtime directory itself is a mount the container engine created, so it
+// may already exist and belong to another identity: this process only creates
+// what it owns, which is why a directory it cannot change is not an error.
 func (s *Supervisor) prepare() error {
+	if err := os.MkdirAll(s.options.RuntimeDir, 0o1777); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("supervisor: cannot create %s: %w", s.options.RuntimeDir, err)
+	}
+
 	directories := []struct {
 		path string
 		mode os.FileMode
 	}{
-		{s.options.RuntimeDir, 0o711},
 		{s.options.ControlDir, 0o700},
-		{s.options.WaylandDir, 0o770},
+		// The application identity has to reach the display socket; the
+		// control plane is protected by peer credentials, not by this mode.
+		{s.options.WaylandDir, 0o755},
 		{s.options.PayloadDir, 0o755},
+		{s.options.ExportDir, 0o700},
 	}
 	for _, directory := range directories {
 		if err := os.MkdirAll(directory.path, directory.mode); err != nil {
@@ -286,7 +416,8 @@ func (s *Supervisor) startAgent() error {
 	return nil
 }
 
-// start runs one child and starts collecting its exit.
+// start runs one child and arranges for its output to reach the session log.
+// Its exit is collected by the session's single reaper, never here.
 func (s *Supervisor) start(name string, argv []string, env []string) (*child, error) {
 	out := &lineWriter{w: s.log, now: s.now}
 	process, err := s.spawn.Start(argv, env, out)
@@ -295,18 +426,21 @@ func (s *Supervisor) start(name string, argv []string, env []string) (*child, er
 		return nil, fmt.Errorf("supervisor: cannot start the %s: %w", name, err)
 	}
 
-	child := &child{name: name, process: process, out: out, done: make(chan error, 1), exited: make(chan struct{})}
-	go func() {
-		err := process.Wait()
-		close(child.exited)
-		child.done <- err
-		out.Flush()
-	}()
-	return child, nil
+	// The spawner copies the child's output into out on its own goroutine and
+	// closes the pipe afterwards. Nothing calls exec.Cmd.Wait any more, so the
+	// supervisor flushes the last partial line itself once that copy loop ends.
+	if drainer, ok := process.(outputDrainer); ok {
+		go func() {
+			<-drainer.Drained()
+			out.Flush()
+		}()
+	}
+
+	return &child{name: name, process: process, out: out, exited: make(chan struct{})}, nil
 }
 
 // waitForSocket waits until the compositor publishes its display socket.
-func (s *Supervisor) waitForSocket(ctx context.Context) error {
+func (s *Supervisor) waitForSocket(ctx context.Context, events <-chan exitEvent) error {
 	socket := filepath.Join(s.options.WaylandDir, s.options.Display)
 	deadline := time.Now().Add(s.options.ReadyTimeout)
 
@@ -331,8 +465,10 @@ func (s *Supervisor) waitForSocket(ctx context.Context) error {
 		}
 
 		select {
-		case err := <-s.weston.done:
-			return fmt.Errorf("supervisor: the compositor exited before publishing a socket: %w", err)
+		case event := <-events:
+			if compositor := s.observe(event); compositor == s.weston {
+				return fmt.Errorf("supervisor: the compositor exited before publishing a socket: %w", compositor.exitError())
+			}
 		case <-ctx.Done():
 			return errors.New("supervisor: stopped while waiting for the compositor")
 		case <-time.After(readyPollInterval):
@@ -373,8 +509,10 @@ func (s *Supervisor) watchReadiness(ctx context.Context, done <-chan struct{}) {
 }
 
 // stopAll asks the children to stop, gives them the configured window, and
-// terminates whatever is left.
-func (s *Supervisor) stopAll() {
+// terminates whatever is left. It consumes the reaper's exit events itself:
+// the session has one reaper reporting to one channel, and Run is not reading
+// that channel while it stops the children.
+func (s *Supervisor) stopAll(events <-chan exitEvent) {
 	var children []*child
 	for _, candidate := range []*child{s.agent, s.weston} {
 		if candidate != nil {
@@ -391,12 +529,28 @@ func (s *Supervisor) stopAll() {
 		}
 	}
 
+	// A child Run already reported is done; only the others still owe an exit.
+	var pending []*child
+	for _, child := range children {
+		if child.state() == session.ProcessRunning {
+			pending = append(pending, child)
+		}
+	}
+
 	deadline := time.After(s.options.StopTimeout)
-	pending := children
 	for len(pending) > 0 {
 		select {
-		case <-pending[0].done:
-			pending = pending[1:]
+		case event := <-events:
+			child := s.observe(event)
+			if child == nil {
+				continue // an orphan, not one of the children being stopped
+			}
+			for index, candidate := range pending {
+				if candidate == child {
+					pending = append(pending[:index], pending[index+1:]...)
+					break
+				}
+			}
 		case <-deadline:
 			for _, child := range pending {
 				_ = child.process.Kill()
@@ -587,7 +741,7 @@ func main() {
 	defer stop()
 
 	options := Options{DisplayGID: displayGIDFromEnv()}
-	supervisor := newSupervisor(options, execSpawner{}, os.Stdout, time.Now)
+	supervisor := newSupervisor(options, osSpawner{}, syscallReaper{}, os.Stdout, time.Now)
 	if err := supervisor.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "wlvision-supervisor: %v\n", err)
 		os.Exit(1)
@@ -688,36 +842,87 @@ func displayGIDFromEnv() int {
 	return gid
 }
 
-// execSpawner starts real child processes.
-type execSpawner struct{}
+// osSpawner starts real child processes without os/exec: exec.Cmd.Wait would
+// compete with the session's single reaper for the child's exit status, so the
+// supervisor starts, signals, and reaps its children itself.
+type osSpawner struct{}
 
 // Start implements Spawner.
-func (execSpawner) Start(argv []string, env []string, out io.Writer) (Process, error) {
+func (osSpawner) Start(argv []string, env []string, out io.Writer) (Process, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("supervisor: no command to start")
 	}
 
-	command := exec.Command(argv[0], argv[1:]...)
-	command.Env = env
-	command.Stdout = out
-	command.Stderr = out
-	// Children are meant to die with the session, never to linger as orphans.
-	command.WaitDelay = DefaultStopTimeout
-	if err := command.Start(); err != nil {
+	// exec.Cmd would look this up; os.StartProcess does not search $PATH.
+	path, err := exec.LookPath(argv[0])
+	if err != nil {
 		return nil, err
 	}
-	return &execProcess{command: command}, nil
+
+	// The child's stdout and stderr share one pipe, which a goroutine copies
+	// into the session log.
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	stdin, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		reader.Close()
+		writer.Close()
+		return nil, err
+	}
+
+	process, err := os.StartProcess(path, argv, &os.ProcAttr{
+		Env:   env,
+		Files: []*os.File{stdin, writer, writer},
+	})
+	stdin.Close()
+	if err != nil {
+		reader.Close()
+		writer.Close()
+		return nil, err
+	}
+	// The parent must not keep its copy of the write end, or the copy loop
+	// below would never see EOF when the child exits.
+	writer.Close()
+
+	started := &osProcess{process: process, drained: make(chan struct{})}
+	go func() {
+		defer close(started.drained)
+		defer reader.Close()
+		_, _ = io.Copy(out, reader)
+	}()
+	return started, nil
 }
 
-// execProcess adapts os/exec to the supervised Process interface.
-type execProcess struct {
-	command *exec.Cmd
+// osProcess is one real child, started with os.StartProcess.
+type osProcess struct {
+	process *os.Process
+	drained chan struct{}
 }
 
-func (p *execProcess) Pid() int { return p.command.Process.Pid }
+func (p *osProcess) Pid() int { return p.process.Pid }
 
-func (p *execProcess) Wait() error { return p.command.Wait() }
+func (p *osProcess) Signal(signal os.Signal) error { return p.process.Signal(signal) }
 
-func (p *execProcess) Signal(signal os.Signal) error { return p.command.Process.Signal(signal) }
+func (p *osProcess) Kill() error { return p.process.Kill() }
 
-func (p *execProcess) Kill() error { return p.command.Process.Kill() }
+// Drained reports when the output copy loop has ended.
+func (p *osProcess) Drained() <-chan struct{} { return p.drained }
+
+// syscallReaper reaps the session's children with wait4(-1, ...): as PID 1 the
+// supervisor must collect every child, including a process that lost its parent
+// and was reparented to it.
+type syscallReaper struct{}
+
+// Reap implements Reaper.
+func (syscallReaper) Reap() (int, syscall.WaitStatus, error) {
+	var status syscall.WaitStatus
+	for {
+		pid, err := syscall.Wait4(-1, &status, 0, nil)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return pid, status, err
+	}
+}

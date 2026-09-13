@@ -23,28 +23,27 @@ import (
 // fakeProcess is one supervised child the test controls.
 type fakeProcess struct {
 	pid     int
-	done    chan error
+	reaper  *fakeReaper
 	mu      sync.Mutex
 	signals []os.Signal
 	killed  bool
 }
 
-func newFakeProcess(pid int) *fakeProcess {
-	return &fakeProcess{pid: pid, done: make(chan error, 1)}
+func newFakeProcess(pid int, reaper *fakeReaper) *fakeProcess {
+	return &fakeProcess{pid: pid, reaper: reaper}
 }
 
 func (p *fakeProcess) Pid() int { return p.pid }
-
-func (p *fakeProcess) Wait() error { return <-p.done }
 
 func (p *fakeProcess) Signal(signal os.Signal) error {
 	p.mu.Lock()
 	p.signals = append(p.signals, signal)
 	p.mu.Unlock()
 
-	select {
-	case p.done <- nil:
-	default:
+	// A real child ends when it is asked to stop, so the exit it owes the
+	// session's single reaper arrives here.
+	if p.reaper != nil {
+		p.reaper.exit(p.pid, syscall.WaitStatus(0))
 	}
 	return nil
 }
@@ -54,9 +53,8 @@ func (p *fakeProcess) Kill() error {
 	p.killed = true
 	p.mu.Unlock()
 
-	select {
-	case p.done <- nil:
-	default:
+	if p.reaper != nil {
+		p.reaper.exit(p.pid, syscall.WaitStatus(syscall.SIGKILL))
 	}
 	return nil
 }
@@ -67,30 +65,82 @@ func (p *fakeProcess) observedSignals() []os.Signal {
 	return append([]os.Signal(nil), p.signals...)
 }
 
-func (p *fakeProcess) exit(err error) { p.done <- err }
+func (p *fakeProcess) wasKilled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.killed
+}
+
+// reapedProcess is one scripted return value of the fake reaper.
+type reapedProcess struct {
+	pid    int
+	status syscall.WaitStatus
+	err    error
+}
+
+// fakeReaper stands in for wait4(-1, ...): it hands the supervisor the exits
+// the test scripts, including exits of processes the supervisor never started.
+type fakeReaper struct {
+	results chan reapedProcess
+	mu      sync.Mutex
+	calls   int
+}
+
+func newFakeReaper() *fakeReaper {
+	return &fakeReaper{results: make(chan reapedProcess, 64)}
+}
+
+func (r *fakeReaper) Reap() (int, syscall.WaitStatus, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+
+	result := <-r.results
+	return result.pid, result.status, result.err
+}
+
+// exit scripts one child exit.
+func (r *fakeReaper) exit(pid int, status syscall.WaitStatus) {
+	r.results <- reapedProcess{pid: pid, status: status}
+}
+
+// noChildren scripts the moment every child is gone.
+func (r *fakeReaper) noChildren() {
+	r.results <- reapedProcess{pid: -1, err: syscall.ECHILD}
+}
+
+func (r *fakeReaper) reapCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
 
 // fakeSpawner hands out fake children and records what was started.
 type fakeSpawner struct {
 	mu        sync.Mutex
+	reaper    *fakeReaper
 	argv      [][]string
 	env       [][]string
 	processes []*fakeProcess
-	onStart   func(argv []string, env []string)
+	onStart   func(process *fakeProcess, argv []string, env []string)
 }
 
 func (s *fakeSpawner) Start(argv []string, env []string, _ io.Writer) (Process, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// A live identifier, because a status probe checks that a running child
-	// still exists. The fake children use this test process.
-	process := newFakeProcess(os.Getpid())
+	// Live identifiers: a status probe only believes a running child while its
+	// process exists, and the two children must be told apart by pid.
+	pid := os.Getpid()
+	if len(s.processes) > 0 {
+		pid = os.Getppid()
+	}
+	process := newFakeProcess(pid, s.reaper)
 	s.argv = append(s.argv, append([]string(nil), argv...))
 	s.env = append(s.env, append([]string(nil), env...))
 	s.processes = append(s.processes, process)
+	s.mu.Unlock()
 
 	if s.onStart != nil {
-		s.onStart(argv, env)
+		s.onStart(process, argv, env)
 	}
 	return process, nil
 }
@@ -111,6 +161,24 @@ func (s *fakeSpawner) child(index int) *fakeProcess {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.processes[index]
+}
+
+// syncBuffer collects a session log while Run is still writing to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func testOptions(t *testing.T) (Options, string) {
@@ -189,11 +257,12 @@ func TestReadStatusRequiresTheControllersMarker(t *testing.T) {
 }
 
 func TestSupervisorStartsTheSessionAndStopsItCleanly(t *testing.T) {
-	spawn := &fakeSpawner{}
+	reaper := newFakeReaper()
+	spawn := &fakeSpawner{reaper: reaper}
 	options, _ := testOptions(t)
 
 	socket := filepath.Join(options.WaylandDir, options.Display)
-	spawn.onStart = func(argv []string, _ []string) {
+	spawn.onStart = func(_ *fakeProcess, argv []string, _ []string) {
 		switch argv[0] {
 		case westonBinary:
 			if err := os.WriteFile(socket, nil, 0o600); err != nil {
@@ -208,7 +277,7 @@ func TestSupervisorStartsTheSessionAndStopsItCleanly(t *testing.T) {
 		}
 	}
 
-	supervisor := newSupervisor(options, spawn, &bytes.Buffer{}, time.Now)
+	supervisor := newSupervisor(options, spawn, reaper, &bytes.Buffer{}, time.Now)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -243,26 +312,34 @@ func TestSupervisorStartsTheSessionAndStopsItCleanly(t *testing.T) {
 		t.Error("the controller was not told which display to use")
 	}
 
-	// Both children are asked to stop, and the last thing the session publishes
-	// is its final state.
+	// Both children are asked to stop politely, and neither has to be killed.
 	for index, child := range []*fakeProcess{spawn.child(0), spawn.child(1)} {
 		signals := child.observedSignals()
 		if len(signals) != 1 || signals[0] != syscall.SIGTERM {
 			t.Errorf("child %d signals = %v, want one SIGTERM", index, signals)
 		}
+		if child.wasKilled() {
+			t.Errorf("child %d was killed although it exited on SIGTERM", index)
+		}
+	}
+
+	// The last thing the session publishes is its final state.
+	if status := ReadStatus(options); status.Weston != session.ProcessExited || status.Agent != session.ProcessExited {
+		t.Errorf("status = %+v, want both children reported as exited", status)
 	}
 }
 
 func TestSupervisorFailsWhenTheCompositorNeverPublishesASocket(t *testing.T) {
-	spawn := &fakeSpawner{}
-	spawn.onStart = func(argv []string, _ []string) {
+	reaper := newFakeReaper()
+	spawn := &fakeSpawner{reaper: reaper}
+	spawn.onStart = func(process *fakeProcess, argv []string, _ []string) {
 		if argv[0] == westonBinary {
 			// The compositor dies immediately, as a broken image would.
-			go spawn.exitWeston()
+			reaper.exit(process.pid, syscall.WaitStatus(2<<8))
 		}
 	}
 	options, _ := testOptions(t)
-	supervisor := newSupervisor(options, spawn, &bytes.Buffer{}, time.Now)
+	supervisor := newSupervisor(options, spawn, reaper, &bytes.Buffer{}, time.Now)
 
 	err := supervisor.Run(context.Background())
 	if err == nil {
@@ -285,22 +362,24 @@ func TestSupervisorFailsWhenTheCompositorNeverPublishesASocket(t *testing.T) {
 }
 
 func TestSupervisorFailsWhenTheControllerExits(t *testing.T) {
-	spawn := &fakeSpawner{}
+	reaper := newFakeReaper()
+	spawn := &fakeSpawner{reaper: reaper}
 	options, _ := testOptions(t)
 	socket := filepath.Join(options.WaylandDir, options.Display)
 
-	spawn.onStart = func(argv []string, _ []string) {
+	spawn.onStart = func(process *fakeProcess, argv []string, _ []string) {
 		switch argv[0] {
 		case westonBinary:
 			if err := os.WriteFile(socket, nil, 0o600); err != nil {
 				t.Errorf("publish the socket: %v", err)
 			}
 		default:
-			go func() { spawn.child(1).exit(errControllerGone) }()
+			// The controller exits on its own, right after it started.
+			reaper.exit(process.pid, syscall.WaitStatus(1<<8))
 		}
 	}
 
-	supervisor := newSupervisor(options, spawn, &bytes.Buffer{}, time.Now)
+	supervisor := newSupervisor(options, spawn, reaper, &bytes.Buffer{}, time.Now)
 	err := supervisor.Run(context.Background())
 	if err == nil {
 		t.Fatal("a session whose controller died was reported as running")
@@ -313,6 +392,132 @@ func TestSupervisorFailsWhenTheControllerExits(t *testing.T) {
 	}
 	if status := ReadStatus(options); status.Agent != session.ProcessExited {
 		t.Errorf("status = %+v, want the controller reported as exited", status)
+	}
+}
+
+func TestSupervisorCollectsAnOrphanWithoutEndingTheSession(t *testing.T) {
+	reaper := newFakeReaper()
+	spawn := &fakeSpawner{reaper: reaper}
+	options, _ := testOptions(t)
+	var log syncBuffer
+
+	socket := filepath.Join(options.WaylandDir, options.Display)
+	spawn.onStart = func(_ *fakeProcess, argv []string, _ []string) {
+		switch argv[0] {
+		case westonBinary:
+			if err := os.WriteFile(socket, nil, 0o600); err != nil {
+				t.Errorf("publish the socket: %v", err)
+			}
+		default:
+			if err := os.WriteFile(filepath.Join(options.ControlDir, readyMarkerName), []byte("1"), 0o600); err != nil {
+				t.Errorf("write the readiness marker: %v", err)
+			}
+		}
+	}
+
+	supervisor := newSupervisor(options, spawn, reaper, &log, time.Now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx) }()
+
+	waitFor(t, func() bool { return ReadStatus(options).Ready })
+
+	// This pid belongs to a process the supervisor never started: it was
+	// reparented to the supervisor because the supervisor is PID 1. Reaping it
+	// must be logged and must not end the session.
+	orphan := os.Getpid() + 7919
+	for _, child := range []*fakeProcess{spawn.child(0), spawn.child(1)} {
+		for orphan == child.Pid() {
+			orphan++
+		}
+	}
+	reaper.exit(orphan, syscall.WaitStatus(3<<8))
+
+	waitFor(t, func() bool { return strings.Contains(log.String(), "orphan") })
+	if logged := log.String(); !strings.Contains(logged, strconv.Itoa(orphan)) || !strings.Contains(logged, "exit status 3") {
+		t.Errorf("the orphan log %q does not name its pid and exit status", logged)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned after reaping an orphan: %v", err)
+	default:
+	}
+
+	// The compositor is still supervised while the orphan was only collected.
+	status := ReadStatus(options)
+	if status.Weston != session.ProcessRunning || status.Agent != session.ProcessRunning {
+		t.Errorf("status = %+v, want both children still running", status)
+	}
+	if !status.Ready {
+		t.Errorf("status = %+v, want the session still ready", status)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after collecting an orphan: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the supervisor did not stop after an orphan was reaped")
+	}
+}
+
+func TestReapLoopDeliversEachExitOnlyOnce(t *testing.T) {
+	reaper := newFakeReaper()
+	options, _ := testOptions(t)
+	supervisor := newSupervisor(options, &fakeSpawner{}, reaper, &bytes.Buffer{}, time.Now)
+
+	reaper.exit(101, syscall.WaitStatus(0))
+	// A later Reap returning the same pid is not a second exit and must not
+	// panic.
+	reaper.exit(101, syscall.WaitStatus(0))
+	reaper.noChildren()
+
+	events := make(chan exitEvent, exitEventBuffer)
+	reaped := make(chan struct{})
+	go supervisor.reapLoop(events, reaped)
+
+	select {
+	case <-reaped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reaper loop did not stop after Reap reported ECHILD")
+	}
+
+	if got := len(events); got != 1 {
+		t.Fatalf("the reaper delivered %d exits, want 1", got)
+	}
+	if event := <-events; event.pid != 101 {
+		t.Errorf("delivered pid = %d, want 101", event.pid)
+	}
+}
+
+func TestReapLoopStopsWhenNoChildrenRemain(t *testing.T) {
+	reaper := newFakeReaper()
+	options, _ := testOptions(t)
+	supervisor := newSupervisor(options, &fakeSpawner{}, reaper, &bytes.Buffer{}, time.Now)
+
+	reaper.exit(101, syscall.WaitStatus(0))
+	reaper.exit(202, syscall.WaitStatus(0))
+	reaper.noChildren()
+
+	events := make(chan exitEvent, exitEventBuffer)
+	reaped := make(chan struct{})
+	go supervisor.reapLoop(events, reaped)
+
+	select {
+	case <-reaped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reaper loop did not stop after Reap reported ECHILD")
+	}
+	if got := reaper.reapCalls(); got != 3 {
+		t.Errorf("Reap calls = %d, want two exits and one ECHILD", got)
+	}
+	if got := len(events); got != 2 {
+		t.Errorf("the reaper delivered %d exits, want 2", got)
 	}
 }
 
@@ -405,20 +610,6 @@ func TestLineWriterStampsEveryLine(t *testing.T) {
 	if !strings.Contains(out.String(), "partial") {
 		t.Errorf("output = %q, want the flushed partial line", out.String())
 	}
-}
-
-var errControllerGone = &childExitError{}
-
-type childExitError struct{}
-
-func (*childExitError) Error() string { return "controller exited" }
-
-// exitWeston makes the fake compositor exit, which is what a broken image does.
-func (s *fakeSpawner) exitWeston() {
-	s.mu.Lock()
-	process := s.processes[0]
-	s.mu.Unlock()
-	process.exit(errControllerGone)
 }
 
 // deadPID returns a process identifier that is certainly not running: the
