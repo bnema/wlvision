@@ -97,3 +97,13 @@ RUN set -eux; \
        /src/wlvision-shell-client.c /src/xdg-shell-protocol.c \
        $(pkg-config --cflags --libs wayland-client); \
     ldd /usr/local/bin/wlvision-shell-client
+
+# Phase 5 integration fixture: same generated xdg-shell bindings, plus
+# libxkbcommon for the --report-input keymap decode.  Deliberately the last
+# layer so the cached Weston build above is never invalidated by it.
+COPY wlvision-fixture.c /src/wlvision-fixture.c
+RUN set -eux; \
+    cc -Wall -Wextra -o /usr/local/bin/wlvision-fixture \
+       /src/wlvision-fixture.c /src/xdg-shell-protocol.c \
+       $(pkg-config --cflags --libs wayland-client xkbcommon); \
+    ldd /usr/local/bin/wlvision-fixture
