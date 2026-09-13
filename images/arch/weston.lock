@@ -1,0 +1,19 @@
+# Pinned Weston baseline. Every image build and every module build reads this
+# file; nothing may fetch a branch, a tag or an unqualified version.
+#
+# Source: https://gitlab.freedesktop.org/wayland/weston
+weston_version=16.0.0
+weston_commit=d1882b0a544ae2197b597a6e39478e719bc54302
+source_archive_url=https://gitlab.freedesktop.org/wayland/weston/-/archive/16.0.0/weston-16.0.0.tar.gz
+source_archive_sha256=6a81af51045ccb2813f3a1d63ff8a66c121743c1a5ff3ce78388660bf650c55c
+libweston_abi_major=16
+#
+# Files wlvision depends on, pinned by digest. Synchronization, input injection
+# and the capture authority are private libweston interfaces, so a Weston
+# upgrade must be a deliberate, reviewed change.
+file_sha256/protocol/weston-output-capture.xml=1e2638fd05f9532739ba3f855fddbc40a6a59b3fc4c27ab30478a64944fea8b7
+file_sha256/include/libweston/libweston.h=56481acd1cad461547e9be3e5980e7f10782940945dea90f6f9541a9264304b5
+file_sha256/include/libweston/desktop.h=a66c422daf93028b63019bf3ab4de4dfdd2bcc3a33ccbff7cf8fcdc0db3fa24b
+file_sha256/libweston/output-capture.h=88adcf0ed96c96a816c169af632a0d449006949e624b04e11f93e909c5ace410
+file_sha256/include/libweston/backend-headless.h=e9859814a700a329db758c3f418696181b0690411a6d9ed75095cb70ff630dbf
+file_sha256/libweston/pixman-renderer.h=740d7917391c2563314f31201e66643ca56ae03b5c6a30c0b84b673ea8de3494
