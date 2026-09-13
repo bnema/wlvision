@@ -217,6 +217,11 @@ func lastRequest(requests []controltest.Request, object uint32, opcode uint16) (
 // formatXRGB8888 is the four-character code the capture protocol announces.
 const formatXRGB8888 = 0x34325258
 
+// formatARGB8888 is the other format the pinned compositor offers. Its value is
+// the zero value of Format, which is why the setup path must not treat zero as
+// "nothing announced yet".
+const formatARGB8888 = 0x34325241
+
 func TestCreateSourceAndWaitForSetup(t *testing.T) {
 	f := newFixture(t)
 	source, _ := f.newSource(t, SourceFramebuffer)
@@ -248,6 +253,94 @@ func TestCreateSourceAndWaitForSetup(t *testing.T) {
 		if !found {
 			t.Error("no create request asked for the full framebuffer")
 		}
+	}
+}
+
+// A compositor may announce the format whose value is zero first, so the setup
+// path must track that a format arrived rather than comparing it to zero.
+func TestWaitForSetupAcceptsTheZeroValuedFormat(t *testing.T) {
+	f := newFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	source, err := CreateSource(ctx, f.capture, f.output, SourceFramebuffer)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+
+	f.creates++
+	manager := f.server.WaitForObjectID(t, generated.WestonCaptureInterface)
+	create := f.nthRequest(t, manager, opCaptureCreate, f.creates)
+	sourceID := create.Uint32(8)
+	if sourceID == 0 {
+		t.Fatal("the create request carried no source object ID")
+	}
+
+	if err := f.server.SendEvent(sourceID, evSize, int32(64), int32(48)); err != nil {
+		t.Fatalf("SendEvent(size): %v", err)
+	}
+	if err := f.server.SendEvent(sourceID, evFormat, formatARGB8888); err != nil {
+		t.Fatalf("SendEvent(format): %v", err)
+	}
+
+	size, format, err := source.WaitForSetup(ctx)
+	if err != nil {
+		t.Fatalf("WaitForSetup: %v", err)
+	}
+	if format != FormatARGB8888 {
+		t.Errorf("format = %s, want argb8888", format)
+	}
+	if size != (Size{Width: 64, Height: 48}) {
+		t.Errorf("size = %s, want 64x48", size)
+	}
+}
+
+// An abandoned capture leaves the compositor owing this source a result. That
+// result cannot be told apart from the answer to a later request, so the source
+// must be retired instead of reused: otherwise a caller receives a frame that
+// was never written.
+func TestAnAbandonedCaptureRetiresTheSource(t *testing.T) {
+	f := newFixture(t)
+	source, sourceID := f.newSource(t, SourceFramebuffer)
+
+	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelSetup()
+	if _, _, err := source.WaitForSetup(setupCtx); err != nil {
+		t.Fatalf("WaitForSetup: %v", err)
+	}
+
+	buffer, err := f.shm.NewBuffer(FormatXRGB8888, 64, 48)
+	if err != nil {
+		t.Fatalf("NewBuffer: %v", err)
+	}
+	defer func() { _ = buffer.Release() }()
+
+	// No compositor answer arrives within the deadline, so the capture is
+	// abandoned while its request is still outstanding.
+	abandoned, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := source.captureInto(abandoned, FormatXRGB8888, buffer); err == nil {
+		t.Fatal("a capture that was never answered succeeded")
+	}
+
+	// The next attempt is refused before it reaches the compositor, so the late
+	// answer to the abandoned request can never be mistaken for a fresh one.
+	retry, cancelRetry := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelRetry()
+	if _, err := source.captureInto(retry, FormatXRGB8888, buffer); !errors.Is(err, ErrSourceRetired) {
+		t.Fatalf("second capture error = %v, want ErrSourceRetired", err)
+	}
+
+	requests := 0
+	for _, request := range f.server.Requests() {
+		if request.Object == sourceID && request.Opcode == opSourceCapture {
+			requests++
+		}
+	}
+	if requests != 1 {
+		t.Errorf("capture requests = %d, want only the abandoned one", requests)
 	}
 }
 

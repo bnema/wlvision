@@ -19,6 +19,12 @@ var ErrCaptureUnavailable = errors.New("capture: compositor refused the capture"
 // ErrSourceClosed reports use of a source after it was destroyed.
 var ErrSourceClosed = errors.New("capture: source is closed")
 
+// ErrSourceRetired reports a capture attempt on a source whose previous
+// capture was abandoned. Once a request is abandoned the compositor still owes
+// this source a result for it, and that result cannot be told apart from the
+// answer to a new request, so the source must be recreated instead of reused.
+var ErrSourceRetired = errors.New("capture: a previous capture was abandoned; create a new source")
+
 // SourceKind selects what the compositor captures.
 type SourceKind uint32
 
@@ -56,10 +62,12 @@ func (s Size) String() string { return fmt.Sprintf("%dx%d", s.Width, s.Height) }
 type Source struct {
 	source *generated.WestonCaptureSource
 
-	mu       sync.Mutex
-	format   Format
-	size     Size
-	inFlight bool
+	mu        sync.Mutex
+	format    Format
+	formatSet bool
+	size      Size
+	inFlight  bool
+	retired   bool
 
 	complete chan struct{}
 	retry    chan struct{}
@@ -119,6 +127,7 @@ func CreateSource(ctx context.Context, capture *generated.WestonCapture, output 
 
 		source.mu.Lock()
 		source.format = format
+		source.formatSet = true
 		source.mu.Unlock()
 	})
 
@@ -173,10 +182,12 @@ func (s *Source) WaitForSetup(ctx context.Context) (Size, Format, error) {
 
 	for {
 		s.mu.Lock()
-		size, format := s.size, s.format
+		size, format, known := s.size, s.format, s.formatSet
 		s.mu.Unlock()
 
-		if size.Width > 0 && format != 0 {
+		// The announced format is what makes the source usable, not a non-zero
+		// value: a valid format is allowed to be zero.
+		if size.Width > 0 && known {
 			return size, format, nil
 		}
 
@@ -235,12 +246,26 @@ func (s *Source) Capture(ctx context.Context, shm *Shm) (Frame, error) {
 // controls: the compositor fills the mapping, which a test harness cannot do
 // without speaking the descriptor protocol.
 func (s *Source) captureInto(ctx context.Context, format Format, buffer *Buffer) (Frame, error) {
+	// A source whose previous capture was abandoned is unusable: the
+	// compositor's late answer to that request would be indistinguishable from
+	// the answer to this one, which is how a caller would receive a frame that
+	// was never written.
+	s.mu.Lock()
+	retired := s.retired
+	s.mu.Unlock()
+	if retired {
+		return Frame{}, ErrSourceRetired
+	}
+
 	if err := s.source.Capture(buffer.Proxy()); err != nil {
 		return Frame{}, fmt.Errorf("request capture: %w", err)
 	}
 
 	select {
 	case <-ctx.Done():
+		s.mu.Lock()
+		s.retired = true
+		s.mu.Unlock()
 		return Frame{}, fmt.Errorf("wait for capture: %w", ctx.Err())
 	case message := <-s.failed:
 		return Frame{}, fmt.Errorf("%w: %s", ErrCaptureUnavailable, message)

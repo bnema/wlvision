@@ -111,6 +111,9 @@ func (s *Shm) NewBuffer(format Format, width, height int) (*Buffer, error) {
 		wlBuffer, uint32(0), uint32(width), uint32(height), uint32(stride), uint32(format)); err != nil {
 		_ = unix.Munmap(data)
 		_ = unix.Close(fd)
+		// The pool was already created on the compositor side, so destroy it
+		// rather than leaving its memory mapped for the life of the connection.
+		_ = s.ctx.SendRequest(pool, poolDestroyOpcode)
 		s.ctx.Unregister(pool)
 		s.ctx.Unregister(wlBuffer)
 		return nil, fmt.Errorf("create wl_buffer: %w", err)
