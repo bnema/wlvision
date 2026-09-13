@@ -14,7 +14,8 @@ Global options come before the command.
 | `--json` | – | Write one JSON envelope on stdout. |
 | `--state-root` | directory | Session state directory. Default `$XDG_STATE_HOME/wlvision`. |
 | `--image` | reference | Session image. Default is the runtime image. |
-| `--context` | name | Container engine context. |
+| `--context` | name | Container engine context (Docker) or connection name (Podman). |
+| `--engine` | `docker` or `podman` | Which container engine to drive. Docker is the default; Podman must be asked for. |
 
 ## Envelope
 

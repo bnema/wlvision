@@ -7,10 +7,11 @@ protection, and what the containment does not defend against.
 
 ## Prerequisites
 
-- A rootless container engine: Docker Rootless or Podman in rootless mode.
-  `doctor` reports the engine kind, context, server version, and whether the
-  engine is rootless. wlvision refuses a rootful engine and has no override;
-  the failure is `engine_not_rootless` (exit 3).
+- A rootless container engine: Docker Rootless, or Podman in rootless mode
+  selected with `--engine podman`. `doctor` reports the engine kind, context or
+  connection, server version, and whether the engine is rootless. wlvision
+  refuses a rootful engine and has no override; the failure is
+  `engine_not_rootless` (exit 3).
 - The engine's built-in seccomp profile. A session cannot be confined without
   one; the failure is `protection_degraded` with `details.missing: seccomp`
   (exit 3).

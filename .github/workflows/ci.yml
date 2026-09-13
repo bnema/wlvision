@@ -1,0 +1,77 @@
+# Continuous integration.
+#
+# wlvision depends on two sibling modules that are developed alongside it: the
+# Wayland transport and the protocol generator. They are not published yet, so
+# this workflow checks all three repositories out side by side and applies the
+# same local development replacements a developer uses, which is exactly what
+# the repository's replacement scripts are for.
+#
+# The stages that build container images are deliberately not part of this
+# workflow: they need the pinned Weston image, which is built from source and
+# cached outside the runner. `bash scripts/verify.sh` runs them locally or in a
+# release job, and its output is the gate a release is signed off against.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The three modules must be siblings: the replacements in go.mod are
+      # relative paths, so the layout is part of the contract.
+      - name: Check out wlvision
+        uses: actions/checkout@v4
+        with:
+          path: wlvision
+      - name: Check out WLTurbo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/wlturbo
+          path: wlturbo
+      - name: Check out LibWL Devices
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/libwldevices-go
+          path: libwldevices-go
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: wlvision/go.mod
+          cache-dependency-path: |
+            wlvision/go.sum
+            wlturbo/go.sum
+            libwldevices-go/go.sum
+
+      # The C server bindings are generated with the reference scanner, so the
+      # binding check needs it on the runner.
+      - name: Install wayland-scanner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-bin
+
+      - name: Apply the local development replacements
+        run: bash wlvision/scripts/use-local-deps.sh
+
+      # Formatting, the pinned Weston baseline, the regenerated bindings, the
+      # replacement check, the build, the vet and the race suite, plus the
+      # release hygiene check that fails while a filesystem replacement is
+      # present in the module graph. The container stages are skipped: see the
+      # header.
+      - name: Verify without the container stages
+        working-directory: wlvision
+        run: bash scripts/verify.sh --fast
