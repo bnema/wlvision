@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bnema/wlvision/internal/engine"
 	"github.com/bnema/wlvision/internal/result"
@@ -279,26 +280,54 @@ func Build(ctx context.Context, containerEngine engine.Engine, plan BuildPlan, s
 		return Result{}, err
 	}
 
-	var output bytes.Buffer
+	// One transcript collects both streams, because the engine writes to them at
+	// the same time: handing the same plain buffer to stdout and stderr would put
+	// two writers inside it at once.
+	transcript := &transcript{}
 	built, err := containerEngine.Build(ctx, engine.BuildSpec{
 		Context:       filepath.Clean(stagingDir),
 		Containerfile: containerfileName,
 		Tag:           plan.Tag,
 		Network:       plan.AllowNetwork,
-		Stdout:        &output,
-		Stderr:        &output,
+		Stdout:        transcript,
+		Stderr:        transcript,
 	})
 	if err != nil {
 		failure := result.NewFailure(result.CodeImageUnavailable, "manifest.build",
 			"the image build failed: %v", err)
-		if tail := outputTail(output.Bytes()); tail != "" {
+		if tail := outputTail(transcript.bytes()); tail != "" {
 			failure.Details = map[string]string{"build_output": tail}
 		}
 		return Result{}, failure
 	}
 
-	return Result{Tag: plan.Tag, ImageID: built.ImageID, Output: output.String()}, nil
+	return Result{Tag: plan.Tag, ImageID: built.ImageID, Output: transcript.string()}, nil
 }
+
+// transcript collects a build's output from both of its streams. The engine
+// writes to them concurrently, so the writer itself is what keeps the text
+// whole.
+type transcript struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write implements io.Writer.
+func (t *transcript) Write(payload []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.buf.Write(payload)
+}
+
+// bytes returns the transcript as it stands.
+func (t *transcript) bytes() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]byte(nil), t.buf.Bytes()...)
+}
+
+// string returns the transcript as it stands.
+func (t *transcript) string() string { return string(t.bytes()) }
 
 // renderContainerfile writes the build recipe. It is reproducible and
 // readable: a digest-pinned FROM, one package transaction when packages are
@@ -371,6 +400,40 @@ func jsonArray(argv []string) string {
 func shortDigest(manifest Manifest) string {
 	sum := sha256.Sum256(canonical(manifest))
 	return hex.EncodeToString(sum[:])[:tagDigestLength]
+}
+
+// ValidateTag refuses an image tag an engine would misread.
+//
+// The rules are the image reference grammar reduced to a tag: a name that
+// starts with the build prefix, or any other `name:tag` pair, with no scheme,
+// no digest, no whitespace and no leading dash that an engine could read as a
+// flag.
+func ValidateTag(tag string) error {
+	trimmed := strings.TrimSpace(tag)
+	switch {
+	case trimmed == "":
+		return usage("tag", "an image tag is required")
+	case trimmed != tag:
+		return usage("tag", "an image tag must not have surrounding whitespace")
+	case strings.HasPrefix(trimmed, "-"):
+		return usage("tag", "%q must not begin with a dash", tag)
+	case len(trimmed) > 255:
+		return usage("tag", "an image tag is longer than 255 characters")
+	}
+	for _, r := range trimmed {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '.', '_', '-', ':', '/', '@':
+			continue
+		}
+		return usage("tag", "%q contains %q, which an image tag cannot carry", tag, r)
+	}
+	if strings.Contains(trimmed, "@") {
+		return usage("tag", "%q looks like a digest pin, not a tag", tag)
+	}
+	return nil
 }
 
 // canonical encodes a manifest deterministically: fixed field order, one

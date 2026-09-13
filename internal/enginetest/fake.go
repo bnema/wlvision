@@ -38,10 +38,12 @@ type Fake struct {
 	// Status is the JSON body the fake supervisor reports to a readiness
 	// probe. Tests set it to describe a starting, ready, or broken session.
 	Status string
-	// BuildValue answers Build. BuildOutput, when set, is written to the
-	// build's standard output so a caller sees a build transcript.
+	// BuildValue answers Build, and BuildOutput, when set, is written to the
+	// build's standard output so a caller sees a build transcript. BuildFunc
+	// overrides both.
 	BuildValue  engine.BuildResult
 	BuildOutput string
+	BuildFunc   func(spec engine.BuildSpec) (engine.BuildResult, error)
 	// ImageIDValue and ImageIDErr answer ImageID.
 	ImageIDValue string
 	ImageIDErr   error
@@ -105,8 +107,12 @@ func (f *Fake) Build(_ context.Context, spec engine.BuildSpec) (engine.BuildResu
 
 	f.mu.Lock()
 	f.builds = append(f.builds, spec)
+	hook := f.BuildFunc
 	f.mu.Unlock()
 
+	if hook != nil {
+		return hook(spec)
+	}
 	if spec.Stdout != nil && f.BuildOutput != "" {
 		if _, err := io.WriteString(spec.Stdout, f.BuildOutput); err != nil {
 			return engine.BuildResult{}, err

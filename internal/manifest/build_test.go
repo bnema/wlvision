@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bnema/wlvision/internal/engine"
@@ -422,5 +424,48 @@ func TestBuildMapsAFailureToImageUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(failure.Details["build_output"], "unable to resolve package gtk4") {
 		t.Errorf("details = %v, want the tail of the build output", failure.Details)
+	}
+}
+
+// The engine writes a build's stdout and stderr at the same time, so the two
+// streams must share one writer that is safe for concurrent use: handing the
+// same plain buffer to both corrupts it and loses the transcript.
+func TestBuildCollectsBothStreamsThroughOneLockedWriter(t *testing.T) {
+	dir := project(t)
+	planned := loadAndPlan(t, writeManifest(t, dir, validManifestBody()))
+
+	fake := enginetest.New()
+	fake.BuildFunc = func(spec engine.BuildSpec) (engine.BuildResult, error) {
+		if spec.Stdout == nil || spec.Stderr == nil {
+			t.Error("a build stream is not connected")
+			return engine.BuildResult{}, nil
+		}
+		if spec.Stdout != spec.Stderr {
+			t.Error("the build's streams do not share one transcript")
+		}
+		// Two writers at once, which is what the engine does.
+		var wg sync.WaitGroup
+		for _, stream := range []io.Writer{spec.Stdout, spec.Stderr} {
+			wg.Add(1)
+			go func(stream io.Writer) {
+				defer wg.Done()
+				for i := 0; i < 200; i++ {
+					if _, err := io.WriteString(stream, "line\n"); err != nil {
+						t.Errorf("write: %v", err)
+						return
+					}
+				}
+			}(stream)
+		}
+		wg.Wait()
+		return engine.BuildResult{ImageID: "sha256:" + strings.Repeat("ef", 32)}, nil
+	}
+
+	built, err := Build(context.Background(), fake, planned, t.TempDir())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := strings.Count(built.Output, "line\n"); got != 400 {
+		t.Errorf("the transcript holds %d of the 400 lines the build wrote", got)
 	}
 }
