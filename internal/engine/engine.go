@@ -122,10 +122,10 @@ func (c Capabilities) MissingLimits(limits Limits) []string {
 // Limits bounds one session. Values are absolute; zero means "do not set".
 // The wall-clock limit is enforced by the session service, not by the engine.
 type Limits struct {
-	MemoryBytes   int64
-	Pids          int
-	FileSizeBytes int64
-	OpenFiles     int
+	MemoryBytes   int64 `json:"memory_bytes"`
+	Pids          int   `json:"pids"`
+	FileSizeBytes int64 `json:"file_size_bytes"`
+	OpenFiles     int   `json:"open_files"`
 }
 
 // Tmpfs is one bounded, memory-backed mount. Device nodes are always denied
