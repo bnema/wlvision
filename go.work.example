@@ -1,0 +1,34 @@
+# go.work.example — OPTIONAL local development workspace.
+#
+# This file is a template, not an active workspace file. It must NOT be
+# committed as go.work (go.work and go.work.sum are gitignored) and it is not
+# required to build, test or release wlvision.
+#
+# Expected sibling checkout layout:
+#
+#   <parent>/
+#   ├── wlvision/          module github.com/bnema/wlvision
+#   ├── wlturbo/           module github.com/bnema/wlturbo          (required sibling)
+#   └── libwldevices-go/   module github.com/bnema/libwldevices-go  (required sibling)
+#
+# Copy this file to go.work when you want the Go tool to resolve both sibling
+# modules from your working tree without touching any committed go.mod, e.g.:
+#
+#   cp go.work.example go.work
+#   go work sync   # optional
+#
+# The scripts in scripts/ are the supported workflow and do not need go.work:
+#   scripts/use-local-deps.sh      add the ../wlturbo and ../libwldevices-go replaces
+#   scripts/check-local-deps.sh    verify those replaces are active
+#   scripts/check-release-modules.sh   verify no replace is active (release guard)
+#   scripts/clear-local-deps.sh    remove the replaces again
+#
+# Remember to delete go.work before running the release guard if you created it.
+
+go 1.27
+
+use (
+	.
+	../wlturbo
+	../libwldevices-go
+)

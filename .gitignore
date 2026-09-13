@@ -1,0 +1,10 @@
+# Local Go workspace files (developer-specific, never committed)
+go.work
+go.work.sum
+
+# Build output
+bin/
+
+# Captured artifacts
+artifacts/
+captures/
