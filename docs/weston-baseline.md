@@ -114,7 +114,12 @@ loader looks for `NAME-shell.so` and `wet_shell_init`, so a module named
 **Option A is therefore the design.** wlvision ships the shell; the pinned
 revision stays unpatched, and the module can own window enumeration, activation,
 move, resize, close, input injection, capture authorization and frame
-sequencing.
+sequencing. The module is `../weston-module/wlvision-shell.c`, and
+`../test/module-runtime/` is the gate that proves it at runtime: a real
+controller enumerates and activates the application's window, completes a
+configure-to-commit resize, is refused a stale revision, injects input, is
+granted capture while a foreign UID is refused the protocol, and receives the
+frame that carried the capture.
 
 ### The options that were weighed
 
