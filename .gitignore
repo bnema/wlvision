@@ -4,6 +4,10 @@ go.work.sum
 
 # Build output
 bin/
+/wlvision
+/wlvision-agent
+/wlvision-call
+/wlvision-supervisor
 
 # Captured artifacts
 artifacts/
