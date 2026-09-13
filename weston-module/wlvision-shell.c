@@ -65,6 +65,10 @@
 
 #define WLVISION_HANDLE_MAX 32
 
+/* Size a toplevel is configured with when no output is ready yet. */
+#define WLVISION_DEFAULT_WIDTH  320
+#define WLVISION_DEFAULT_HEIGHT 240
+
 #define wlvision_container_of(ptr, type, member) \
 	((type *)(void *)((char *)(ptr) - offsetof(type, member)))
 
@@ -891,6 +895,33 @@ observed_view_mapping(struct wlvision_shell *shell,
 	toplevel->mapped = true;
 }
 
+/*
+ * A client waits for its first configure before it maps a window, so a shell
+ * that never configures anything leaves every application unmapped. The initial
+ * size is the output's, or a small default when no output is ready yet.
+ */
+static void
+configure_initial_size(struct wlvision_shell *shell,
+		       struct wlvision_toplevel *toplevel)
+{
+	struct weston_output *output;
+	int32_t width = WLVISION_DEFAULT_WIDTH;
+	int32_t height = WLVISION_DEFAULT_HEIGHT;
+
+	wl_list_for_each(output, &shell->compositor->output_list, link) {
+		width = output->width;
+		height = output->height;
+		break;
+	}
+
+	if (width <= 0 || height <= 0) {
+		width = WLVISION_DEFAULT_WIDTH;
+		height = WLVISION_DEFAULT_HEIGHT;
+	}
+
+	weston_desktop_surface_set_size(toplevel->surface, width, height);
+}
+
 static void
 desktop_surface_added(struct weston_desktop_surface *surface, void *data)
 {
@@ -912,6 +943,8 @@ desktop_surface_added(struct weston_desktop_surface *surface, void *data)
 
 	weston_desktop_surface_set_user_data(surface, toplevel);
 	wl_list_insert(shell->toplevels.prev, &toplevel->link);
+
+	configure_initial_size(shell, toplevel);
 
 	shell_bump_revision(shell);
 	emit_toplevel_changed(shell, toplevel);
@@ -1146,10 +1179,14 @@ frame_signal_notify(struct wl_listener *listener, void *data)
 
 	shell->frame_sequence++;
 
-	if (shell->capture_request_pending) {
+	/*
+	 * The outstanding authorization is reported on every frame until a new one
+	 * replaces it, rather than only on the first frame after it. A repaint can
+	 * happen between the authorization and the capture request, and the frame
+	 * that actually carries the capture is the one whose id the caller needs.
+	 */
+	if (shell->capture_request_pending)
 		capture_request_id = shell->capture_request_id;
-		shell->capture_request_pending = false;
-	}
 
 	if (shell->controller_resource != NULL) {
 		wlvision_controller_v1_send_frame(shell->controller_resource,

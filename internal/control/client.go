@@ -49,6 +49,18 @@ type Client interface {
 	// and returns the capture request id the module correlated it with.
 	AuthorizeCapture(ctx context.Context) (uint64, error)
 
+	// Binds a test or a checker can reach, and the connection the module
+	// authorizes for capture.
+	//
+	// The controller owns the session's only privileged connection. Capture in
+	// particular must happen here: the module authorizes the controller's own
+	// client and denies every other attempt.
+	Context() *wl.Context
+
+	// Registry exposes the connection's registry, so a caller can bind further
+	// globals on the connection the module authorized.
+	Registry() *wl.Registry
+
 	// Frames reports every repaint the module observed, including repaints it
 	// forced for a capture request.
 	Frames() <-chan Frame
@@ -448,6 +460,10 @@ func (c *client) AuthorizeCapture(ctx context.Context) (uint64, error) {
 
 	return captureRequestID, nil
 }
+
+func (c *client) Context() *wl.Context { return c.display.Context() }
+
+func (c *client) Registry() *wl.Registry { return c.display.GetRegistry() }
 
 func (c *client) Frames() <-chan Frame { return c.frames }
 

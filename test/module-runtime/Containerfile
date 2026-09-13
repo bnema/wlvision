@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+#
+# Runtime image for the wlvision Weston module.
+#
+# It builds on the shell image, which already carries the pinned Weston built
+# and installed together with the fixture client, and adds the module itself.
+# The session script starts Weston with wlvision-shell, runs the fixture client
+# as the control user, and drives the control protocol with the Go probe.
+FROM wlvision-weston-shell:local
+
+# The module is compiled against the pinned Weston's own pkg-config metadata.
+COPY weston-module /src/weston-module
+RUN cd /src/weston-module \
+    && gcc -shared -fPIC -Wall -Wextra -Wno-unused-parameter \
+         -o /usr/lib/weston/wlvision-shell.so \
+         wlvision-shell.c generated/wlvision-control-protocol.c \
+         $(pkg-config --cflags --libs weston) \
+    # Weston's shell loader resolves a shell named NAME through NAME-shell.so.
+    && ln -sf /usr/lib/weston/wlvision-shell.so /usr/lib/weston/wlvision-shell-shell.so
+
+COPY test/module-runtime/session.sh /usr/local/bin/wlvision-session
+RUN chmod 755 /usr/local/bin/wlvision-session
