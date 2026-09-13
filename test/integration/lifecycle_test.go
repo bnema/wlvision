@@ -205,15 +205,29 @@ func TestLifecycle(t *testing.T) {
 	})
 
 	t.Run("create waits for readiness", func(t *testing.T) {
-		h.succeed("session", "create", "--session", h.session, "--wait")
 
-		envelope := h.succeed("session", "inspect", "--session", h.session)
-		var record session.Record
-		if err := json.Unmarshal(envelope.Result, &record); err != nil {
+		// `session create` reports the record it wrote under its own key.
+		envelope := h.succeed("session", "create", "--session", h.session, "--wait")
+		var created struct {
+			Session session.Record `json:"session"`
+		}
+		if err := json.Unmarshal(envelope.Result, &created); err != nil {
+			t.Fatalf("the create result is unreadable: %v", err)
+		}
+
+		envelope = h.succeed("session", "inspect", "--session", h.session)
+		var inspected struct {
+			Session session.Record `json:"session"`
+		}
+		if err := json.Unmarshal(envelope.Result, &inspected); err != nil {
 			t.Fatalf("the session record is unreadable: %v", err)
 		}
+		record := inspected.Session
 		if record.State != session.StateReady {
 			t.Fatalf("session state = %s, want ready", record.State)
+		}
+		if created.Session.ContainerID != record.ContainerID {
+			t.Errorf("the created session names %q, the record %q", created.Session.ContainerID, record.ContainerID)
 		}
 		if record.ContainerID == "" {
 			t.Error("the record names no container")
@@ -330,12 +344,14 @@ func TestLifecycle(t *testing.T) {
 		_, _ = h.inContainer(controlUID, "pkill", "-f", "wlvision-shell-client")
 
 		envelope := h.succeed("session", "inspect", "--session", h.session)
-		var record session.Record
-		if err := json.Unmarshal(envelope.Result, &record); err != nil {
+		var inspected struct {
+			Session session.Record `json:"session"`
+		}
+		if err := json.Unmarshal(envelope.Result, &inspected); err != nil {
 			t.Fatalf("the session record is unreadable: %v", err)
 		}
-		if record.State != session.StateReady {
-			t.Errorf("session state = %s, want the session to survive its application", record.State)
+		if inspected.Session.State != session.StateReady {
+			t.Errorf("session state = %s, want the session to survive its application", inspected.Session.State)
 		}
 	})
 
@@ -399,10 +415,13 @@ func (h *harness) waitForWindow() {
 func (h *harness) call(operation, params string) string {
 	h.t.Helper()
 
-	argv := []string{callBinary, operation}
+	// The caller takes its flags before the operation, like every other
+	// command in this project.
+	argv := []string{callBinary}
 	if params != "" {
 		argv = append(argv, "--params", params)
 	}
+	argv = append(argv, operation)
 
 	output, code := h.inContainer(controlUID, argv...)
 	if code != 0 {
