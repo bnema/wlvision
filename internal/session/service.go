@@ -117,20 +117,20 @@ func NewService(options Options) (*Service, error) {
 
 // Anomaly is one reconciliation finding, tied to the session it concerns.
 type Anomaly struct {
-	Session string
-	Kind    string
+	Session string `json:"session"`
+	Kind    string `json:"kind"`
 }
 
 // DoctorReport answers "can wlvision run here, and what does it already run".
 type DoctorReport struct {
-	StateRoot    string
-	Image        string
-	ControlUID   uint32
-	AppUID       uint32
-	Capabilities engine.Capabilities
-	Degradations []string
-	Sessions     []Record
-	Anomalies    []Anomaly
+	StateRoot    string              `json:"state_root"`
+	Image        string              `json:"image"`
+	ControlUID   uint32              `json:"control_uid"`
+	AppUID       uint32              `json:"application_uid"`
+	Capabilities engine.Capabilities `json:"capabilities"`
+	Degradations []string            `json:"degradations,omitempty"`
+	Sessions     []Record            `json:"sessions,omitempty"`
+	Anomalies    []Anomaly           `json:"anomalies,omitempty"`
 }
 
 // Doctor inspects the engine and reconciles every stored session.

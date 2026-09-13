@@ -57,19 +57,19 @@ const (
 // Capabilities describes what an engine can actually enforce. It is recorded
 // in session metadata and checked before a session is created.
 type Capabilities struct {
-	Kind          Kind
-	Context       string
-	ServerVersion string
-	Rootless      bool
+	Kind          Kind   `json:"kind"`
+	Context       string `json:"context"`
+	ServerVersion string `json:"server_version"`
+	Rootless      bool   `json:"rootless"`
 	// SeccompProfile is the name of the profile the engine applies, empty when
 	// it applies none.
-	SeccompProfile string
-	CgroupVersion  string
-	CgroupDriver   string
+	SeccompProfile string `json:"seccomp_profile"`
+	CgroupVersion  string `json:"cgroup_version"`
+	CgroupDriver   string `json:"cgroup_driver"`
 	// MemoryLimit and PidsLimit report whether the corresponding controller is
 	// delegated to the rootless user.
-	MemoryLimit bool
-	PidsLimit   bool
+	MemoryLimit bool `json:"memory_limit"`
+	PidsLimit   bool `json:"pids_limit"`
 }
 
 // Validate refuses an engine wlvision cannot confine a session with. A rootful
