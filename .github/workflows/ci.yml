@@ -57,8 +57,10 @@ jobs:
             wlturbo/go.sum
             libwldevices-go/go.sum
 
-      # The C server bindings are generated with the reference scanner, so the
-      # binding check needs it on the runner.
+      # scripts/generate-protocols.sh only regenerates the C server bindings
+      # with the release this repository pins, so the runner's scanner is used
+      # when its package ships that release and the C half is skipped until it
+      # does. The Go bindings are checked either way.
       - name: Install wayland-scanner
         run: |
           sudo apt-get update

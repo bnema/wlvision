@@ -7,6 +7,12 @@
 # write into committed paths and are expected to be byte-stable: running this
 # twice must produce no diff, and CI fails when a regenerated file drifts.
 #
+# wayland-scanner changes its output between releases, so the C bindings can
+# only be reproduced by the release that generated them. That release is pinned
+# below. A host carrying another one regenerates the Go bindings and leaves the
+# C files as they are, saying so, rather than failing a comparison it cannot
+# win: distributions ship older scanners than the one this repository pins.
+#
 # The capture protocol is a copy of a file from the pinned Weston revision, so
 # this refuses to run when that pin no longer matches.
 set -euo pipefail
@@ -22,6 +28,17 @@ if ! command -v wayland-scanner >/dev/null 2>&1; then
 	exit 1
 fi
 
+# The release whose code generation the committed C bindings are. The tool
+# reports its version on stderr.
+wayland_scanner_pin="1.26.0"
+host_scanner="$(wayland-scanner --version 2>&1 | awk '{print $2}')"
+check_c=1
+if [[ "${host_scanner}" != "${wayland_scanner_pin}" ]]; then
+	check_c=0
+	printf 'note: wayland-scanner %s is not the pinned %s; the C bindings are not regenerated\n' \
+		"${host_scanner:-unknown}" "${wayland_scanner_pin}" >&2
+fi
+
 scanner() {
 	go run github.com/bnema/libwldevices-go/scanner/cmd/wayland-scanner "$@"
 }
@@ -33,6 +50,7 @@ generate_go() {
 }
 
 generate_c() {
+	[[ "${check_c}" -eq 1 ]] || return 0
 	local xml="$1" header="$2" code="$3"
 	mkdir -p "$(dirname -- "${header}")"
 	wayland-scanner server-header "${xml}" "${header}"
@@ -57,4 +75,8 @@ chmod 644 internal/control/generated/wlvision_control.go internal/capture/genera
 
 gofmt -l internal/control/generated internal/capture/generated
 
-echo "protocols regenerated from protocol/*.xml"
+if [[ "${check_c}" -eq 1 ]]; then
+	echo "protocols regenerated from protocol/*.xml"
+else
+	echo "Go bindings regenerated; C bindings left to wayland-scanner ${host_scanner:-unknown}"
+fi
