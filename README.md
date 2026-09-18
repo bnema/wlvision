@@ -17,6 +17,33 @@ machine with no display, no session bus, and no interactive user.
 - The pinned session image. `doctor` reports what the host provides, including
   any protection the engine cannot enforce.
 
+## Build
+
+wlvision is developed beside its two sibling modules, WLTurbo and LibWL
+Devices. Check them out as siblings and resolve the development replacements:
+
+```bash
+scripts/use-local-deps.sh     # apply, or refresh, the sibling replacements
+scripts/check-local-deps.sh   # assert they are exactly what the modules expect
+scripts/clear-local-deps.sh   # remove them for a release build
+
+go build -o bin/wlvision ./cmd/wlvision
+```
+
+A session also needs the session image: the pinned Weston shell built from
+source, plus wlvision's own binaries, which `images/arch/Containerfile` layers
+on top. Building it as `wlvision-runtime:latest` matches the default `--image`,
+so the CLI needs no further configuration:
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/ ./cmd/...
+bash test/weston-shell/run.sh
+docker build -t wlvision-runtime:latest -f images/arch/Containerfile .
+```
+
+`bash test/integration/run.sh` builds that image and runs the session gates
+against it.
+
 ## Use
 
 ```bash
@@ -72,15 +99,6 @@ written under `$XDG_STATE_HOME/wlvision/export/<session>/` and nowhere else.
 
 ## Development
 
-wlvision is developed beside its two sibling modules, WLTurbo and LibWL Devices.
-Check them out as siblings and apply the local replacements:
-
-```bash
-scripts/use-local-deps.sh     # apply, or refresh, the sibling replacements
-scripts/check-local-deps.sh   # assert they are exactly what the modules expect
-scripts/clear-local-deps.sh   # remove them for a release build
-```
-
 `scripts/verify.sh` is the gate a change must survive: formatting, the pinned
 Weston baseline, the regenerated protocol bindings, the development
 replacements, the build, the vet, the race suite, the keyboard table, the module
@@ -94,3 +112,7 @@ X11 clients are out of scope: V1 runs native Wayland clients only. An optional
 `xwayland-satellite` image capability, GPU rendering, multiple outputs,
 accessibility inspection, perceptual image thresholds, a live viewer, and an MCP
 adapter over the CLI are follow-ups.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
